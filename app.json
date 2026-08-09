@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "商超台账",
+    "slug": "mobile-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "retail-ledger",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.retail.ledger"
+    },
+    "android": {
+      "package": "com.retail.ledger",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "CAMERA",
+        "android.permission.CAMERA"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "用于在店内离线拍摄进货单据照片并自动命名",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-sqlite"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "0f897bd4-97c3-4e85-9d67-abede6408f54"
+      }
+    },
+    "owner": "sucen2011s-team"
+  }
+}
