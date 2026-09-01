@@ -4,12 +4,19 @@ export interface ApiResult {
   ok: boolean;
   status: number;
   json: any;
+  text?: string;
 }
 
 function timeout(ms: number) {
   return new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error(`fetch timeout ${ms}ms`)), ms)
   );
+}
+
+/** 判断响应体是不是网页而非 API JSON（常见于填成静态文件服务器端口） */
+function looksLikeHtml(text: string): boolean {
+  const t = text.trimStart();
+  return t.startsWith('<!DOCTYPE') || t.startsWith('<html') || t.startsWith('<');
 }
 
 // 统一 fetch 封装：自动携带 x-api-token（与 web 端一致，所有非 GET 写操作必须）
@@ -27,16 +34,20 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Ap
     ])) as Response;
     console.log('[apiFetch] response status=', res.status, path);
     let json: any = {};
+    let text = '';
     try {
-      const text = await res.text();
+      text = await res.text();
       console.log('[apiFetch] response text length=', text.length, path);
+      if (looksLikeHtml(text)) {
+        console.warn('[apiFetch] WARN response looks like HTML, not API JSON. Check baseUrl port.', path, text.slice(0, 120));
+      }
       json = text ? JSON.parse(text) : {};
     } catch (e) {
       console.log('[apiFetch] parse json fail', e, path);
       /* 忽略解析失败，交由调用方按 status 判断 */
     }
     console.log('[apiFetch] end', path, 'ok=', res.ok);
-    return { ok: res.ok, status: res.status, json };
+    return { ok: res.ok, status: res.status, json, text };
   } catch (e: any) {
     console.log('[apiFetch] error', e?.message || e, path);
     throw e;

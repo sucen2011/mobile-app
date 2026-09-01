@@ -1,4 +1,4 @@
-export type TabKey = 'overview' | 'entry' | 'records' | 'report' | 'settings';
+export type TabKey = 'home' | 'business' | 'barrel' | 'goods' | 'mine';
 
 export interface SyncState {
   pendingCount: number;

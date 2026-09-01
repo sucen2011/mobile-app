@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
-import { theme } from '../theme';
+import { useTheme } from '../theme/ThemeProvider';
 import {
   getAllDrafts,
   deleteDraft,
@@ -18,11 +18,15 @@ interface Props {
   onNewPurchase: () => void;
   onNewRevenue: () => void;
   onEditDraft: (id: string) => void;
+  onEditRevenueDraft?: (id: string) => void;
   onSyncAll: () => void;
   onRefreshPending: () => void;
+  embedded?: boolean;
 }
 
-export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue, onEditDraft, onSyncAll, onRefreshPending }: Props) {
+export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue, onEditDraft, onEditRevenueDraft, onSyncAll, onRefreshPending, embedded }: Props) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const [drafts, setDrafts] = useState<Draft[]>(() => getAllDrafts());
   // 营收草稿：离线记的营收也躺在本机等推送，草稿箱必须能看到、能删、能手动重试，
   // 否则它就成了一笔「只有同步引擎知道、用户看不见」的账。
@@ -77,16 +81,11 @@ export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue
     ]);
   };
 
-  return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <Text style={styles.title}>录单</Text>
-      </View>
+  const body = (<>
 
-      <ScrollView contentContainerStyle={styles.content}>
         {/* 同步状态条 ma-syncbar 四态 */}
-        <TouchableOpacity style={styles.syncBar} onPress={() => onNavigate('settings')}>
-          <View style={[styles.syncDot, { backgroundColor: syncPhaseColor(phase) }]} />
+        <TouchableOpacity style={styles.syncBar} onPress={() => onNavigate('mine')}>
+          <View style={[styles.syncDot, { backgroundColor: syncPhaseColor(phase, theme) }]} />
           <Text style={styles.syncText}>{syncPhaseText(phase, sync.pendingCount)}</Text>
           <Text style={styles.syncArrow}>›</Text>
         </TouchableOpacity>
@@ -135,7 +134,7 @@ export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue
                     </Text>
                   </TouchableOpacity>
                   <View style={styles.itemActions}>
-                    <View style={[styles.tag, { backgroundColor: draftStatusColor(d.status) }]} />
+                    <View style={[styles.tag, { backgroundColor: draftStatusColor(d.status, theme) }]} />
                     <TouchableOpacity style={styles.delBtn} onPress={() => handleDelete(d)} hitSlop={12}>
                       <Text style={styles.delText}>×</Text>
                     </TouchableOpacity>
@@ -145,13 +144,13 @@ export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue
             })}
             {revDrafts.map((d) => (
               <View key={d.id} style={styles.item}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.itemNo}>营收 {d.date}</Text>
+              <TouchableOpacity style={{ flex: 1 }} onPress={() => onEditRevenueDraft?.(d.id)}>
+                <Text style={styles.itemNo}>营收 {d.date}</Text>
                   <Text style={styles.itemSub}>¥{d.total.toFixed(2)}{d.note ? ` · ${d.note}` : ''}</Text>
-                  <Text style={styles.itemSub}>{draftStatusText(d.status)}</Text>
-                </View>
-                <View style={styles.itemActions}>
-                  <View style={[styles.tag, { backgroundColor: draftStatusColor(d.status) }]} />
+                <Text style={styles.itemSub}>{draftStatusText(d.status)}</Text>
+              </TouchableOpacity>
+              <View style={styles.itemActions}>
+                  <View style={[styles.tag, { backgroundColor: draftStatusColor(d.status, theme) }]} />
                   <TouchableOpacity style={styles.delBtn} onPress={() => handleDeleteRevenue(d)} hitSlop={12}>
                     <Text style={styles.delText}>×</Text>
                   </TouchableOpacity>
@@ -161,7 +160,15 @@ export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue
             </>
           )}
         </View>
-      </ScrollView>
+      </>);
+
+  if (embedded) return <View>{body}</View>;
+  return (
+    <View style={styles.root}>
+      <View style={styles.header}>
+        <Text style={styles.title}>录单</Text>
+      </View>
+      <ScrollView contentContainerStyle={styles.content}>{body}</ScrollView>
     </View>
   );
 }
@@ -183,14 +190,14 @@ function draftStatusText(s: Draft['status']) {
   if (s === 'synced') return '已同步';
   return '待同步';
 }
-function draftStatusColor(s: Draft['status']) {
+function draftStatusColor(s: Draft['status'], theme: any) {
   if (s === 'syncing') return theme.color.statusSyncing;
   if (s === 'conflict') return theme.color.statusConflict;
   if (s === 'synced') return theme.color.statusSynced;
   return theme.color.statusPending;
 }
 
-function syncPhaseColor(p: string) {
+function syncPhaseColor(p: string, theme: any) {
   if (p === 'syncing') return theme.color.info;
   if (p === 'offline') return theme.color.textAppTertiary;
   if (p === 'pending') return theme.color.statusPending;
@@ -203,8 +210,9 @@ function syncPhaseText(p: string, n: number) {
   return '已同步 · 本地已清理';
 }
 
-const S = theme.size;
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  const S = theme.size;
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bgApp },
   header: { paddingHorizontal: theme.spaceScale[4], paddingTop: theme.spaceScale[4], paddingBottom: theme.spaceScale[2] },
   title: { fontSize: theme.font.sizeV4.h2, fontWeight: theme.font.weight.bold, color: theme.color.textApp },
@@ -247,3 +255,4 @@ const styles = StyleSheet.create({
   delBtn: { width: S.tapMin, height: S.tapMin, alignItems: 'center', justifyContent: 'center' },
   delText: { color: theme.color.textAppTertiary, fontSize: 24, fontWeight: theme.font.weight.bold },
 });
+}

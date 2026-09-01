@@ -1,18 +1,25 @@
 {
   "expo": {
-    "name": "商超台账",
+    "name": "\u5546\u8d85\u53f0\u8d26",
     "slug": "mobile-app",
-    "version": "1.0.0",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "retail-ledger",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.retail.ledger"
+      "bundleIdentifier": "com.retail.ledger",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
     },
     "android": {
       "package": "com.retail.ledger",
+      "versionCode": 7,
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -22,7 +29,8 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "CAMERA",
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.INTERNET"
       ]
     },
     "web": {
@@ -32,12 +40,20 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "用于在店内离线拍摄进货单据照片并自动命名",
+          "cameraPermission": "Used for offline receipt scanning in the store.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {

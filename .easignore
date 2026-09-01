@@ -14,3 +14,7 @@ coverage
 **/*.spec.ts
 .DS_Store
 Thumbs.db
+# 历史产出物（旧 APK / 构建日志 / 辅助脚本）：体积大且与源码无关，绝不上传
+*.apk
+eas_build*.log
+fetch_eas_log.js

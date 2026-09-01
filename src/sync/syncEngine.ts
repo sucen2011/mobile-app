@@ -13,13 +13,31 @@ import {
   setRevenueDraftStatus,
   markRevenueDraftPushed,
   deleteRevenueDraft,
+  getUnsyncedBarrelPress,
+  getUnsyncedBarrelRefund,
+  markBarrelPressSynced,
+  markBarrelRefundSynced,
   type RevenueDraft,
+  type Draft,
 } from '../db/localDb';
 import { pushRecords } from '../api/sync';
 import { apiFetch } from '../api/client';
 import { uploadImage } from '../api/upload';
 
-// 实际连通探测：带 token 请求 /api/revenue（GET 能响应即视为已连上店铺局域网）
+function isApiJson(body: any, text: string): boolean {
+  if (!body) return false;
+  if (typeof body === 'object') {
+    if (Array.isArray(body)) return true;
+    if (Array.isArray(body.data)) return true;
+    if (typeof body.code === 'number') return true;
+  }
+  const t = text.trimStart();
+  return !(t.startsWith('<!DOCTYPE') || t.startsWith('<html') || t.startsWith('<'));
+}
+
+// 实际连通探测：带 token 请求 /api/revenue，必须返回合法 API JSON 才算真正连上。
+// 如果返回的是静态网页（如把前端页面端口 8081 错填成后端地址），这里会判为不可达，
+// 避免后续把所有 API 都当成“已同步”但实际没拿到数据。
 export async function isReachable(baseUrl: string): Promise<boolean> {
   const timeout = (ms: number) =>
     new Promise<never>((_, reject) =>
@@ -34,8 +52,12 @@ export async function isReachable(baseUrl: string): Promise<boolean> {
       }),
       timeout(4000),
     ])) as Response;
-    console.log('[syncEngine] isReachable ok status=', res.status);
-    return res.status !== 0; // 任何 HTTP 响应都说明网络可达
+    const text = await res.text();
+    let body: any = null;
+    try { body = text ? JSON.parse(text) : null; } catch { /* ignore */ }
+    const valid = res.ok && isApiJson(body, text);
+    console.log('[syncEngine] isReachable status=', res.status, 'valid=', valid, text.slice(0, 80));
+    return valid;
   } catch (e: any) {
     console.log('[syncEngine] isReachable fail', e?.message || e);
     return false;
@@ -162,6 +184,135 @@ async function pushRevenueDrafts(
   return { synced, conflict, failed };
 }
 
+/**
+ * 进货单成功推送后，按草稿标记派生一条入库单。
+ * 入库单是采购单的只读派生：后端落库不调库存接口，绝不会造成库存双扣。
+ * 返回 true=生成成功（或无需生成），false=需重试。
+ */
+async function createStockInFromDraft(baseUrl: string, d: Draft, record: any): Promise<boolean> {
+  try {
+    // 过滤合成单（录单据/其他模式的「进货(总额)」「其他」占位行），它们不是真实商品明细
+    const items = (record.items || []).filter(
+      (it: any) => it && it.name && it.name !== '进货(总额)' && it.name !== '其他'
+    );
+    if (items.length === 0) return true; // 没有可导入的明细，视为无需生成
+    const payload = {
+      sourcePurchaseNo: d.orderNo,
+      supplierName: d.supplierName,
+      stockInDate: d.purchaseDate || d.date,
+      status: 1, // 已入库
+      remark: '',
+      items: items.map((it: any) => ({
+        barcode: it.barcode || '',
+        name: it.name,
+        spec: '',
+        unit: it.unit || '',
+        quantity: Number(it.quantity) || 0,
+        price: Number(it.price) || 0,
+        amount: Number(it.amount) || (Number(it.quantity) || 0) * (Number(it.price) || 0),
+      })),
+    };
+    const res = await apiFetch(`${baseUrl}/api/stock-in`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return res.ok && res.json?.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+// ============ 桶装水双向同步 ============
+//
+// 下行（PC→手机）已在 fetchAndCacheSnapshot 内完成：拉 /api/barrel/{press,refund} 按单号 no
+// 去重合并、/api/barrel/type 补充本地。这里只做上行（手机→PC）：把本地 synced=0 的
+// 压桶 / 退桶记录 POST 到 PC 对应接口，成功即标记 synced=1。
+//
+// 去重关键是业务单号 no：手机保存时生成 YT/TK+日期+随机，上行把 no 带给 PC，
+// PC 用该 no（POST 契约 no 字段优先），所以 PC 上的 no 与手机本地一致；
+// 下次下行拉 PC 记录时按 no 命中本地、跳过——不会重复记账。
+export async function syncBarrelRecords(
+  baseUrl: string,
+  onProgress?: (msg: string) => void
+): Promise<{ pushed: number; failed: number }> {
+  let pushed = 0;
+  let failed = 0;
+
+  // ---- 上行：压桶 ----
+  for (const p of getUnsyncedBarrelPress()) {
+    try {
+      onProgress?.(`同步压桶单 ${p.no || p.customer}…`);
+      const res = await apiFetch(`${baseUrl}/api/barrel/press`, {
+        method: 'POST',
+        body: JSON.stringify({
+          no: p.no,
+          customer: p.customer,
+          phone: p.phone || undefined,
+          date: p.date,
+          channel: 'cash',
+          items: (p.items || []).map((i) => ({ barrel: i.barrel, count: i.count, unitPrice: i.unitPrice })),
+          totalDeposit: p.totalDeposit,
+          received: p.received,
+          paid: p.received,
+          handler: p.handler || undefined,
+        }),
+      });
+      if (res.ok && res.json?.code === 0) {
+        markBarrelPressSynced(p.id);
+        pushed++;
+        onProgress?.(`压桶单 ${p.no || p.customer} 已同步`);
+      } else {
+        failed++;
+        onProgress?.(`压桶单 ${p.no || p.customer} 同步失败（${res.json?.msg || res.status}），稍后重试`);
+      }
+    } catch (e: any) {
+      failed++;
+      onProgress?.(`压桶单 ${p.no || p.customer} 异常：${e?.message || '失败'}`);
+    }
+  }
+
+  // ---- 上行：退桶 ----
+  for (const r of getUnsyncedBarrelRefund()) {
+    try {
+      onProgress?.(`同步退桶单 ${r.no || r.customer}…`);
+      const res = await apiFetch(`${baseUrl}/api/barrel/refund`, {
+        method: 'POST',
+        body: JSON.stringify({
+          no: r.no,
+          pressNo: r.pressNo || null,
+          customer: r.customer,
+          phone: r.phone || undefined,
+          date: r.date,
+          items: (r.items || []).map((i) => ({
+            barrel: i.barrel,
+            count: i.count,
+            // PC 的 deduct = sum(count*unitPrice)，手机退桶 item.deduct 是损耗金额；
+            // 折算成单价让 PC 的扣减损耗近似等于手机总损耗。
+            unitPrice: Number(i.deduct || 0) > 0
+              ? Number(i.deduct) / Math.max(1, Number(i.count) || 1)
+              : Number(i.unitPrice || 0),
+          })),
+          totalDeduct: r.totalDeduct,
+          refund: r.refund,
+        }),
+      });
+      if (res.ok && res.json?.code === 0) {
+        markBarrelRefundSynced(r.id);
+        pushed++;
+        onProgress?.(`退桶单 ${r.no || r.customer} 已同步`);
+      } else {
+        failed++;
+        onProgress?.(`退桶单 ${r.no || r.customer} 同步失败（${res.json?.msg || res.status}），稍后重试`);
+      }
+    } catch (e: any) {
+      failed++;
+      onProgress?.(`退桶单 ${r.no || r.customer} 异常：${e?.message || '失败'}`);
+    }
+  }
+
+  return { pushed, failed };
+}
+
 // 执行一次完整同步（对齐 §18 M-06/M-07/M-08）：
 // 遍历 pending 草稿 → 上传照片(B方案) → push → 成功即删本地 → 冲突保留云端删本地
 export async function runSync(
@@ -261,6 +412,7 @@ export async function runSync(
         version: d.syncVersion,
         purchaseDate: d.purchaseDate || d.date,
         stockStatus: d.stockStatus ?? 1,
+        category: d.category || '',
       };
       console.log('[syncEngine] push record', record);
       onProgress?.(`推送单据 ${d.orderNo}…`);
@@ -268,6 +420,18 @@ export async function runSync(
       console.log('[syncEngine] push response', JSON.stringify(resp));
       const r = resp?.data?.results?.[0];
       if (r?.ok) {
+        // 「保存为入库单」：进货单推送成功后，派生一条入库单（只读派生，不调库存）。
+        // 仅商品明细方式开启且确有可导入明细时才生成；失败则保留草稿打回 pending，
+        // 借采购单 clientTempId 幂等键，下一轮同步会重新推送采购单并再次尝试生成入库单，
+        // 不会因重试产生重复采购单。
+        if (d.saveToStockIn) {
+          const stockOk = await createStockInFromDraft(baseUrl, d, record);
+          if (!stockOk) {
+            setDraftStatus(d.id, 'pending');
+            onProgress?.(`单据 ${d.orderNo} 入库单生成失败，稍后重试`);
+            continue;
+          }
+        }
         // 成功即删本地（单据 + 照片）
         deleteDraft(d.id);
         await deleteLocalImages(localImages);
@@ -303,16 +467,34 @@ export async function runSync(
     failed++;
   }
 
-  if (synced === 0 && conflict === 0 && failed === 0) {
+  // 桶装水双向同步：上行本地未同步的压桶 / 退桶到 PC（下行已在 fetchAndCacheSnapshot 内完成）。
+  // 独立 try：桶装水同步出问题不该连累进货 / 营收同步结果。
+  let barrelPushed = 0;
+  let barrelFailed = 0;
+  try {
+    const bSync = await syncBarrelRecords(baseUrl, onProgress);
+    barrelPushed = bSync.pushed;
+    barrelFailed = bSync.failed;
+    if (barrelPushed > 0 || barrelFailed > 0) {
+      onProgress?.(`桶装水同步：成功 ${barrelPushed}${barrelFailed ? `，失败 ${barrelFailed}` : ''}`);
+    }
+  } catch (e: any) {
+    console.warn('[syncEngine] syncBarrelRecords failed:', e?.message || e);
+  }
+
+  const totalSynced = synced + barrelPushed;
+  const totalFailed = failed + barrelFailed;
+
+  if (totalSynced === 0 && conflict === 0 && totalFailed === 0) {
     onProgress?.('无待同步单据');
     console.log('[syncEngine] nothing to sync');
     return { synced, conflict, failed };
   }
 
   onProgress?.(
-    failed === 0
-      ? `同步完成（成功 ${synced}${conflict ? `，冲突 ${conflict}` : ''}）`
-      : `同步结束：成功 ${synced}，失败 ${failed}`
+    totalFailed === 0
+      ? `同步完成（成功 ${totalSynced}${conflict ? `，冲突 ${conflict}` : ''}）`
+      : `同步结束：成功 ${totalSynced}，失败 ${totalFailed}`
   );
-  return { synced, conflict, failed };
+  return { synced: totalSynced, conflict, failed: totalFailed };
 }

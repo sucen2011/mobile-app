@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, Platform, AppState } from 'react-native';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
-import { DEFAULT_STORE_BASE_URL, DEVICE_ID, SYNC_INTERVAL_MS, loadDeviceId, loadBaseUrl, saveBaseUrl } from './src/config';
-import { theme } from './src/theme';
+import { DEFAULT_STORE_BASE_URL, DEVICE_ID, SYNC_INTERVAL_MS, loadDeviceId, loadBaseUrl, saveBaseUrl, refreshApiToken, loadSyncPrefs, saveSyncPrefs, loadOnboarding, saveOnboarding, type SyncPrefs } from './src/config';
+import { ThemeProvider, useTheme } from './src/theme/ThemeProvider';
 import {
   fetchAndCacheSnapshot,
   getUnsyncedDraftCount,
   getUnsyncedRevenueDraftCount,
+  getUnsyncedBarrelPressCount,
+  getUnsyncedBarrelRefundCount,
 } from './src/db/localDb';
 import { runSync } from './src/sync/syncEngine';
 import { startSyncListener } from './src/sync/syncListener';
@@ -15,36 +17,42 @@ import { SafeAreaRoot } from './src/components/SafeArea';
 import type { TabKey, SyncState } from './src/nav';
 
 import OverviewScreen from './src/screens/OverviewScreen';
-import EntryHub from './src/screens/EntryHub';
-import RecordsScreen from './src/screens/RecordsScreen';
-import ReportScreen from './src/screens/ReportScreen';
+import BusinessScreen from './src/screens/BusinessScreen';
+import BarrelWaterScreen from './src/screens/BarrelWaterScreen';
+import GoodsScreen from './src/screens/GoodsScreen';
 import Settings from './src/screens/Settings';
+import LoginScreen from './src/screens/LoginScreen';
 import EntryForm from './src/screens/EntryForm';
 import RevenueForm from './src/screens/RevenueForm';
 import RecordDetail from './src/screens/RecordDetail';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'overview', label: '概览', icon: '🏠' },
-  { key: 'entry', label: '录单', icon: '➕' },
-  { key: 'records', label: '明细', icon: '📋' },
-  { key: 'report', label: '报表', icon: '📈' },
-  { key: 'settings', label: '我的', icon: '⚙️' },
+  { key: 'home', label: '首页', icon: '🏠' },
+  { key: 'business', label: '经营', icon: '🧾' },
+  { key: 'barrel', label: '桶装水', icon: '💧' },
+  { key: 'goods', label: '商品', icon: '📦' },
+  { key: 'mine', label: '我的', icon: '👤' },
 ];
 
 /**
- * 待同步总数 = 进货草稿 + 营收草稿，两条独立队列必须一起算。
+ * 待同步总数 = 进货草稿 + 营收草稿 + 桶装水压桶/退桶，四条独立队列必须一起算。
  *
  * 收敛成一个函数而不是在三处各写一遍 `a() + b()`：这个表达式有三个调用点
  * （初始值 / refreshPending / tick 闸门），漏改任何一处的后果都不一样且都很隐蔽 ——
- * 尤其是 tick 闸门漏算营收时，会出现「只有营收草稿时 runSync 根本不被调用，
- * 电脑早开机了那笔营收却永远推不上去」。
+ * 尤其是 tick 闸门漏算营收/桶装水时，会出现「只有该类草稿时 runSync 根本不被调用，
+ * 电脑早开机了那笔数据却永远推不上去」。
  *
  * 全程 try/catch：它同时被 useState 惰性初始化在 **render 阶段**调用，
  * 此时抛错没有 ErrorBoundary 接，整棵树会卸载 → 白屏。计数宁可显示 0 也不能崩。
  */
 function totalUnsyncedCount(): number {
   try {
-    return getUnsyncedDraftCount() + getUnsyncedRevenueDraftCount();
+    return (
+      getUnsyncedDraftCount() +
+      getUnsyncedRevenueDraftCount() +
+      getUnsyncedBarrelPressCount() +
+      getUnsyncedBarrelRefundCount()
+    );
   } catch (e: any) {
     console.warn('[App] count unsynced failed:', e?.message || e);
     return 0;
@@ -52,21 +60,35 @@ function totalUnsyncedCount(): number {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<TabKey>('overview');
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
+  );
+}
+
+function AppInner() {
+  const { theme, mode } = useTheme();
+  const [tab, setTab] = useState<TabKey>('home');
   const [baseUrl, setBaseUrl] = useState(DEFAULT_STORE_BASE_URL);
   // 惰性初始化而不是先 0 再等 effect 刷：冷启动首帧就显示真实待同步数，
   // 离线打开 App 时用户第一眼看到的就是「待同步 3」，而不是先闪一下 0。
   const [pendingCount, setPendingCount] = useState(() => totalUnsyncedCount());
   const [lanOn, setLanOn] = useState(false);
+  // 同步开关（设置页持久化）：自动同步总闸 + 仅店铺 WiFi 同步
+  const [syncPrefs, setSyncPrefs] = useState<SyncPrefs>({ autoSync: true, wifiOnly: true });
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [cacheVersion, setCacheVersion] = useState(0);
   const [liveOn, setLiveOn] = useState(false);
+  // 首次连接引导：未引导（done=false）时显示「连接店铺」登录页；连上或离线跳过后才进主界面
+  const [onboarded, setOnboarded] = useState(false);
 
   // 模态
   const [entryEditId, setEntryEditId] = useState<string | undefined>();
   const [showEntry, setShowEntry] = useState(false);
   const [showRevenue, setShowRevenue] = useState(false);
+  const [revenueEditId, setRevenueEditId] = useState<string | undefined>();
   // kind 'revenueDraft'：尚未推送到服务端的本机营收草稿（离线记的那一笔）
   const [detail, setDetail] = useState<{
     kind: 'revenue' | 'purchase' | 'draft' | 'revenueDraft';
@@ -95,6 +117,12 @@ export default function App() {
     saveBaseUrl(v);
   }, []);
 
+  // 同步开关变更：更新内存态并落盘（下次启动照样生效）
+  const handleSyncPrefsChange = useCallback((p: SyncPrefs) => {
+    setSyncPrefs(p);
+    void saveSyncPrefs(p);
+  }, []);
+
   // 测试与店铺后端的连通性（容错：自动补 http:// 前缀）
   //
   // 必须自带超时：店里电脑一关机，这个地址就变成"没有主机应答"而不是"连接被拒绝"，
@@ -111,11 +139,41 @@ export default function App() {
         fetch(`${full}/api/revenue`, { method: 'GET' }),
         timeout(6000),
       ])) as Response;
-      const ok = res.ok || res.status === 401;
-      return { ok, msg: ok ? '连接成功，可正常使用' : `服务器返回 ${res.status}` };
+      const text = await res.text();
+      const looksLikeHtml = text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html') || text.trimStart().startsWith('<');
+      if (looksLikeHtml) {
+        return { ok: false, msg: `返回的是网页而不是接口，请检查端口（正确端口通常是 :3001 或 :8089，不是 :8081 等前端页面端口）` };
+      }
+      let body: any = null;
+      try { body = text ? JSON.parse(text) : null; } catch { /* ignore */ }
+      const isApiJson = body && (Array.isArray(body) || Array.isArray(body.data) || typeof body.code === 'number');
+      const ok = (res.ok || res.status === 401) && isApiJson;
+      return { ok, msg: ok ? '连接成功，可正常使用' : `服务器返回 ${res.status}，但内容不是有效接口数据` };
     } catch (e: any) {
-      return { ok: false, msg: `连接失败：${e?.message || '网络不可达'}（店铺电脑未开机时属正常，录入的草稿会先存本机）` };
+      let tip = '店铺电脑未开机时属正常，录入的草稿会先存本机';
+      if (/:\s*8089/.test(full)) tip = ':8089 生产后端当前未启动，开发测试请改用 :3001';
+      else if (/:\s*8081/.test(full)) tip = ':8081 是前端页面端口，请改用 :3001 或 :8089';
+      return { ok: false, msg: `连接失败：${e?.message || '网络不可达'}（${tip}）` };
     }
+  }, []);
+
+  // 首次连接引导：连接店铺 / 离线使用 / 退出登录重置
+  const handleConnect = useCallback((url: string) => {
+    setBaseUrl(url);
+    void saveBaseUrl(url);
+    // 连接成功后立即用新地址拉取并缓存接口令牌：避免首笔 OCR 多走一次 bootstrap，
+    // 也消除「bootstrap 曾返回空令牌被缓存」导致连上后依旧 401 的边界。
+    void refreshApiToken();
+    void saveOnboarding({ done: true, mode: 'connected' });
+    setOnboarded(true);
+  }, []);
+  const handleSkip = useCallback(() => {
+    void saveOnboarding({ done: true, mode: 'offline' });
+    setOnboarded(true);
+  }, []);
+  const handleLogout = useCallback(() => {
+    void saveOnboarding({ done: false, mode: 'offline' });
+    setOnboarded(false);
   }, []);
 
   const refreshCache = useCallback(async () => {
@@ -164,6 +222,10 @@ export default function App() {
     try {
       const onLan = await isOnStoreLan(); // 内部已 catch，失败返回 false
       setLanOn(onLan);
+      // 自动同步总闸：关掉后纯离线，只录本地，既不推送也不拉快照
+      if (!syncPrefs.autoSync) return;
+      // 仅店铺 WiFi 同步：开启时只有连上店铺局域网才同步；关掉则任意可达网络都同步
+      if (syncPrefs.wifiOnly && !onLan) return;
       if (!onLan) return; // 不在店铺网段：纯离线态，只录本地，不做任何网络动作
       // 闸门必须用「进货 + 营收」的总数：只数进货的话，用户离线只记了营收时
       // 这里恒为 0 → 永远走 refreshCache 分支 → runSync 一次都不被调用 →
@@ -193,6 +255,12 @@ export default function App() {
         const savedUrl = await loadBaseUrl(); // 恢复用户已保存的店铺后端地址（支持店外/公网地址）
         if (!alive) return;
         if (savedUrl) setBaseUrl(savedUrl);
+        const prefs = await loadSyncPrefs(); // 恢复同步开关设置
+        if (!alive) return;
+        setSyncPrefs(prefs);
+        const ob = await loadOnboarding(); // 恢复连接引导状态
+        if (!alive) return;
+        setOnboarded(ob.done);
         await tickRef.current();
       } catch (e: any) {
         console.warn('[App] sync bootstrap failed, timer still installed:', e?.message || e);
@@ -243,6 +311,36 @@ export default function App() {
     setShowEntry(true);
   };
 
+  const S = theme.size;
+  const styles = StyleSheet.create({
+    root: { flex: 1, backgroundColor: theme.color.bgApp },
+    content: { flex: 1 },
+    tabbar: {
+      flexDirection: 'row',
+      backgroundColor: theme.color.surfaceApp,
+      borderTopWidth: 1,
+      borderTopColor: theme.color.borderApp,
+      // C3：iOS 底部内缩由 SafeAreaRoot（四边 inset）负责；
+      //     Android 无 Home Indicator，补一点留白避免贴到手势条
+      height: S.tabbarH + (Platform.OS === 'android' ? 8 : 0),
+      paddingBottom: Platform.OS === 'android' ? 8 : 0,
+    },
+    tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+    tabIcon: { fontSize: 20, marginBottom: 2, opacity: 0.55 },
+    tabLabel: { fontSize: theme.font.sizeV4.micro, color: theme.color.textAppTertiary },
+    tabActive: { color: theme.color.navIndicator, opacity: 1, fontWeight: theme.font.weight.semibold },
+    modal: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.color.bgApp },
+  });
+
+  if (!onboarded) {
+    return (
+      <SafeAreaRoot style={styles.root}>
+        <ExpoStatusBar style={mode === 'light' ? 'dark' : 'light'} />
+        <LoginScreen initialUrl={baseUrl} onConnect={handleConnect} onSkip={handleSkip} />
+      </SafeAreaRoot>
+    );
+  }
+
   return (
     // 安全区根容器：原先这里写的是 paddingTop: StatusBar.currentHeight，
     // 而 StatusBar.currentHeight 是 Android-only，iOS 上恒为 undefined → 内边距 0，
@@ -251,29 +349,35 @@ export default function App() {
     // 绝对定位 overlay；iOS 上 RCTSafeAreaView 的 inset 传不到四边钉死的绝对定位子节点，
     // 所以 EntryForm / RevenueForm / RecordDetail 的 header 各自用 SafeAreaHeader 补顶部安全区。
     <SafeAreaRoot style={styles.root}>
-      <ExpoStatusBar style="light" />
+      <ExpoStatusBar style={mode === 'light' ? 'dark' : 'light'} />
 
       <View style={styles.content}>
-        {tab === 'overview' && (
+        {tab === 'home' && (
           <OverviewScreen key={cacheVersion} sync={sync} onNavigate={setTab} onOpenDetail={setDetail} />
         )}
-        {tab === 'entry' && (
-          <EntryHub
+        {tab === 'business' && (
+          <BusinessScreen
             sync={sync}
             onNavigate={setTab}
             onNewPurchase={() => openEntry()}
-            onNewRevenue={() => setShowRevenue(true)}
+            onNewRevenue={() => {
+              setRevenueEditId(undefined);
+              setShowRevenue(true);
+            }}
             onEditDraft={(id) => openEntry(id)}
+            onEditRevenueDraft={(id) => {
+              setRevenueEditId(id);
+              setShowRevenue(true);
+            }}
+            onOpenDetail={setDetail}
             onSyncAll={() => void doSync()}
             onRefreshPending={refreshPending}
           />
         )}
-        {tab === 'records' && (
-          <RecordsScreen key={cacheVersion} sync={sync} onOpenDetail={setDetail} />
-        )}
-        {tab === 'report' && <ReportScreen key={cacheVersion} sync={sync} />}
-        {tab === 'settings' && (
-          <Settings baseUrl={baseUrl} onBaseUrlChange={handleBaseUrlChange} onTestConnection={testConnection} sync={sync} />
+        {tab === 'barrel' && <BarrelWaterScreen sync={sync} cacheVersion={cacheVersion} onSyncAll={() => void doSync()} />}
+        {tab === 'goods' && <GoodsScreen sync={sync} cacheVersion={cacheVersion} />}
+        {tab === 'mine' && (
+          <Settings baseUrl={baseUrl} onBaseUrlChange={handleBaseUrlChange} onTestConnection={testConnection} sync={sync} syncPrefs={syncPrefs} onSyncPrefsChange={handleSyncPrefsChange} onLogout={handleLogout} />
         )}
       </View>
 
@@ -312,21 +416,26 @@ export default function App() {
         </View>
       )}
 
-      {/* 模态：记一笔营收 */}
+      {/* 模态：记一笔营收 / 编辑营收草稿 */}
       {showRevenue && (
         <View style={styles.modal}>
           <RevenueForm
             baseUrl={baseUrl}
             lanOn={lanOn}
+            editId={revenueEditId}
             onSaved={() => {
               setShowRevenue(false);
+              setRevenueEditId(undefined);
               // 营收现在也是「先落本机草稿」，所以和进货一样：先刷计数，
               // 再顺手试一次同步（后端不可达时 doSync 内部静默失败，草稿留在本机等下一轮）。
               // 原来这里只调 refreshCache()，那是个浮空 promise，且离线时必然失败 —— 白跑一趟。
               refreshPending();
               if (lanOn) void doSync();
             }}
-            onCancel={() => setShowRevenue(false)}
+            onCancel={() => {
+              setShowRevenue(false);
+              setRevenueEditId(undefined);
+            }}
           />
         </View>
       )}
@@ -348,24 +457,3 @@ export default function App() {
     </SafeAreaRoot>
   );
 }
-
-const S = theme.size;
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bgApp },
-  content: { flex: 1 },
-  tabbar: {
-    flexDirection: 'row',
-    backgroundColor: theme.color.surfaceApp,
-    borderTopWidth: 1,
-    borderTopColor: theme.color.borderApp,
-    // C3：iOS 底部内缩由 SafeAreaRoot（四边 inset）负责；
-    //     Android 无 Home Indicator，补一点留白避免贴到手势条
-    height: S.tabbarH + (Platform.OS === 'android' ? 8 : 0),
-    paddingBottom: Platform.OS === 'android' ? 8 : 0,
-  },
-  tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  tabIcon: { fontSize: 20, marginBottom: 2, opacity: 0.55 },
-  tabLabel: { fontSize: theme.font.sizeV4.micro, color: theme.color.textAppTertiary },
-  tabActive: { color: theme.color.navIndicator, opacity: 1, fontWeight: theme.font.weight.semibold },
-  modal: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.color.bgApp },
-});

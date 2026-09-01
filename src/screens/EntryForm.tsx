@@ -1,16 +1,21 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   StyleSheet, View, Text, TextInput, TouchableOpacity, ScrollView, Modal, Alert,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Switch,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { BOTTOM_INSET, SafeAreaHeader } from '../components/SafeArea';
-import { theme } from '../theme';
+import ScanFrame from '../components/ScanFrame';
+import { useTheme } from '../theme/ThemeProvider';
 import { insertDraft, updateDraft, getDraftById, getCachedPurchases } from '../db/localDb';
 import { DEVICE_ID } from '../config';
 import { fetchSuppliers } from '../api/suppliers';
+import { apiFetch } from '../api/client';
 import { toLocalDateStr } from '../utils/dateLabel';
+import { parsePurchaseBill } from '@sucen/ocr-core';
 import DatePickerField from '../components/DatePickerField';
+// ⚠️ 必须用 /legacy 子入口：SDK 54 主入口的 readAsStringAsync 是调用即抛的弃用桩
+import * as FileSystem from 'expo-file-system/legacy';
 
 interface ItemRow {
   barcode?: string;
@@ -18,6 +23,7 @@ interface ItemRow {
   quantity: string;
   unit: string;
   price: string;
+  imageUri?: string; // 标识该明细来自哪张照片；空/undefined 表示手动添加
 }
 
 function uuid() {
@@ -32,6 +38,8 @@ const ENTRY_MODE_OPTIONS = [
 ] as const;
 
 export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { editId?: string; baseUrl: string; onSaved: () => void; onCancel: () => void }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const today = toLocalDateStr(new Date());
   const draftId = useRef(uuid()).current; // 一次生成，保证 orderNo 默认值与保存 id 一致
 
@@ -42,7 +50,11 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
   // （date 是全 App 通用的记录日期：明细/概览/报表排序、orderNo、上传归档都用它，不能去掉列）。
   const [purchaseDate, setPurchaseDate] = useState(today);
   const [entryMode, setEntryMode] = useState<'bill' | 'detail' | 'other'>('bill');
-  const [items, setItems] = useState<ItemRow[]>([{ name: '', quantity: '', unit: '', price: '', barcode: '' }]);
+  // 「保存为入库单」开关：仅商品明细方式可开启。默认关闭（与 PC 端一致），开启后
+  // 该进货单成功同步到后端时会派生一条入库单（状态=已入库）。
+  const [saveToStockIn, setSaveToStockIn] = useState(false);
+  const [items, setItems] = useState<ItemRow[]>([{ name: '', quantity: '', unit: '', price: '', barcode: '', imageUri: '' }]);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [totalAmountInput, setTotalAmountInput] = useState('');
   const [arrivalDate, setArrivalDate] = useState('');
   const [paidAmount, setPaidAmount] = useState('');
@@ -50,9 +62,12 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
   const [note, setNote] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [recognizing, setRecognizing] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const [pictureSize, setPictureSize] = useState<string | undefined>();
   const camRef = useRef<CameraView>(null);
+  // 重拍替换：记录当前正在重拍的是哪张照片 URI；非空时 onCapture 走「替换而非追加」逻辑
+  const [retakeUri, setRetakeUri] = useState<string | null>(null);
 
   // 供应商名称自动补全：列表在挂载/聚焦时拉取一次（API + 本地缓存名做回退），按键时本地过滤
   const [supplierList, setSupplierList] = useState<string[]>([]);
@@ -85,7 +100,7 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
       // 依次回退，保证编辑态永远有一个有效的进货日期，不会出现空白日期框。
       setPurchaseDate(d.purchaseDate || d.date || today);
       const parsed = safeArray(d.items);
-      setItems(parsed.length ? parsed.map((it: any) => ({ barcode: it.barcode || '', name: it.name, quantity: String(it.quantity), unit: it.unit, price: String(it.price) })) : [{ name: '', quantity: '', unit: '', price: '', barcode: '' }]);
+      setItems(parsed.length ? parsed.map((it: any) => ({ barcode: it.barcode || '', name: it.name, quantity: String(it.quantity), unit: it.unit, price: String(it.price), imageUri: '' })) : [{ name: '', quantity: '', unit: '', price: '', barcode: '', imageUri: '' }]);
       setEntryMode(parsed.length ? 'detail' : 'bill');
       setTotalAmountInput(parsed.length ? '' : String(d.totalAmount || ''));
       setArrivalDate(d.arrivalDate);
@@ -146,7 +161,27 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
     return supplierList.filter((n) => n.toLowerCase().includes(q)).slice(0, 20);
   })();
 
-  const addItem = () => setItems([...items, { name: '', quantity: '', unit: '', price: '', barcode: '' }]);
+  const addItem = () => setItems([...items, { name: '', quantity: '', unit: '', price: '', barcode: '', imageUri: '' }]);
+  const addItemToGroup = (uri: string) => {
+    let insertAt = items.length;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if ((items[i].imageUri || '') === uri) {
+        insertAt = i + 1;
+        break;
+      }
+    }
+    const next = [...items];
+    next.splice(insertAt, 0, { name: '', quantity: '', unit: '', price: '', barcode: '', imageUri: uri });
+    setItems(next);
+  };
+  const toggleGroup = (uri: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(uri)) next.delete(uri);
+      else next.add(uri);
+      return next;
+    });
+  };
   const updateItem = (i: number, key: keyof ItemRow, val: string) => {
     const next = [...items];
     next[i] = { ...next[i], [key]: val };
@@ -162,6 +197,21 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
         return;
       }
     }
+    setRetakeUri(null); // 普通拍照是「追加」，清掉可能残留的重拍目标
+    setCameraOpen(true);
+  };
+
+  // 某张照片识别不准 → 重新拍照识别：打开相机并标记要替换的目标 URI。
+  // OCR 对同一张图确定性，重跑无效果；必须重拍新图替换原图再识别。
+  const handleRetake = async (uri: string) => {
+    if (!permission?.granted) {
+      const r = await requestPermission();
+      if (!r.granted) {
+        Alert.alert('需要相机权限才能拍照');
+        return;
+      }
+    }
+    setRetakeUri(uri);
     setCameraOpen(true);
   };
 
@@ -188,7 +238,7 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
     }
   }, []);
 
-  const onCapture = async () => {
+  const onCapture = async (doRecognize = false) => {
     try {
       // skipProcessing:true + 最大 pictureSize：保留相机原生全分辨率，避免 iOS 被压到 ~1080p
       const photo = await camRef.current?.takePictureAsync({
@@ -198,11 +248,210 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
       });
       console.log('[camera] photo', photo?.uri, 'size', photo?.width, 'x', photo?.height);
       // 去重：同一个 uri 绝不进两次，否则同步时会被当成两张照片各传一遍
-      if (photo?.uri) setImages((prev) => (prev.includes(photo.uri) ? prev : [...prev, photo.uri]));
+      if (photo?.uri) {
+        const renamed = await renameCapturedPhoto(photo.uri);
+        const target = retakeUri; // 捕获当前重拍目标，后续 setRetakeUri(null) 不影响本函数逻辑
+        if (target) {
+          // 重拍替换模式：新照片直接替换旧照片 URI，images / items.imageUri / collapsedGroups 三处同步
+          setImages((prev) => prev.map((u) => (u === target ? renamed : u)));
+          setItems((prev) =>
+            prev.map((it) => (it.imageUri === target ? { ...it, imageUri: renamed } : it)),
+          );
+          setCollapsedGroups((prev) => {
+            if (!prev.has(target)) return prev;
+            const next = new Set(prev);
+            next.delete(target);
+            next.add(renamed);
+            return next;
+          });
+          setRetakeUri(null);
+          // 重拍的目的就是用新照片重新识别，强制跑 OCR（无视用户按的是「拍摄」还是「识别」）
+          await recognizeUri(renamed);
+        } else {
+          setImages((prev) => (prev.includes(renamed) ? prev : [...prev, renamed]));
+          if (doRecognize) await recognizeUri(renamed);
+        }
+      }
     } catch (e: any) {
       Alert.alert('拍照失败', e?.message || '');
     } finally {
       setCameraOpen(false);
+    }
+  };
+
+  // 把 expo-camera 的随机 UUID 缓存文件名改为「供应商_日期_序号.jpg」，
+  // 这样 UI 列表和后续归档都直观；失败则回退原 uri 不影响功能。
+  const renameCapturedPhoto = async (uri: string): Promise<string> => {
+    try {
+      // 过滤文件名非法/特殊字符（含微信里常见的【】[]），避免部分文件系统显示异常
+      const safeSupplier = (supplierName || '单据').replace(/[\\/:*?"<>|\[\]【】\r\n\t]/g, '').trim().slice(0, 20) || '单据';
+      // 文件名日期用「进货日期」(purchaseDate)，而非拍照当天：单据照片按业务日期归档，
+      // OCR 回填的单据日期不应影响归档名。进货日期未填时回退拍照当天，避免文件名出现空段。
+      const dateStr = (purchaseDate || today).replace(/-/g, '');
+      const dir = (FileSystem.documentDirectory || '') + 'bill_images/';
+      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+      const existing = await FileSystem.readDirectoryAsync(dir).catch(() => [] as string[]);
+      const prefix = `${safeSupplier}_${dateStr}_`;
+      const seq = existing.filter((f) => f.startsWith(prefix) && f.endsWith('.jpg')).length + 1;
+      const fileName = `${prefix}${seq}.jpg`;
+      const dest = dir + fileName;
+      await FileSystem.copyAsync({ from: uri, to: dest });
+      console.log('[EntryForm] renamed photo', uri, '->', dest);
+      return dest;
+    } catch (e: any) {
+      console.warn('[EntryForm] rename photo failed, use original', e?.message || e);
+      return uri;
+    }
+  };
+
+  // 拍照时供应商可能还没填（录单据模式常见），文件先以「单据」占位命名；
+  // OCR 回填供应商/进货日期后，这里把文件重命名为规范的「供应商_进货日期_序号.jpg」，
+  // 与商品明细模式保持一致。文件名已符合规范则不动，避免无谓的磁盘读写。
+  const renameToCanonical = async (uri: string, supplier: string, date: string): Promise<string> => {
+    try {
+      const safeSupplier = (supplier || '单据').replace(/[\\/:*?"<>|\[\]【】\r\n\t]/g, '').trim().slice(0, 20) || '单据';
+      const dateStr = (date || today).replace(/-/g, '');
+      const dir = (FileSystem.documentDirectory || '') + 'bill_images/';
+      const baseName = uri.split('/').pop() || '';
+      const prefix = `${safeSupplier}_${dateStr}_`;
+      if (baseName.startsWith(prefix) && baseName.endsWith('.jpg')) return uri; // 已规范，跳过
+      const existing = await FileSystem.readDirectoryAsync(dir).catch(() => [] as string[]);
+      // 找到该供应商+日期下的下一个序号，且确保不与已存在文件撞名
+      let seq = existing.filter((f) => f.startsWith(prefix) && f.endsWith('.jpg')).length + 1;
+      let fileName = `${prefix}${seq}.jpg`;
+      while (existing.includes(fileName)) {
+        seq += 1;
+        fileName = `${prefix}${seq}.jpg`;
+      }
+      const dest = dir + fileName;
+      await FileSystem.copyAsync({ from: uri, to: dest });
+      await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      console.log('[EntryForm] canonical rename', uri, '->', dest);
+      return dest;
+    } catch (e: any) {
+      console.warn('[EntryForm] canonical rename failed, keep original', e?.message || e);
+      return uri;
+    }
+  };
+
+  // 调后端 /api/ocr/scan 识别进货单照片，解析后回填表单字段（仅覆盖为空/默认值的字段，不覆盖用户已填内容）
+  const recognizeUri = async (uri: string) => {
+    setRecognizing(true);
+    try {
+      // 读本地图片为 base64 dataURL：用 Expo FileSystem 读文件 → base64
+      const base64 = await readFileAsBase64(uri);
+      const full = /^https?:\/\//.test(baseUrl) ? baseUrl.replace(/\/+$/, '') : `http://${baseUrl.replace(/\/+$/, '')}`;
+      const res = await apiFetch(`${full}/api/ocr/scan`, {
+        method: 'POST',
+        body: JSON.stringify({ data: `data:image/jpeg;base64,${base64}` }),
+      });
+      // 先判 HTTP 状态：鉴权失败/未连上服务器必须明确提示，不能再和「真没识别出字」混为一谈
+      if (!res.ok) {
+        const reason =
+          res.status === 401
+            ? '未连接店铺服务器或鉴权失败：请在「设置」填入服务器地址，并确保手机连店铺 WiFi（仅局域网下发接口令牌）。'
+            : res.status === 503
+              ? '数据库启动中，请稍候重试。'
+              : `识别请求被拒绝（HTTP ${res.status}），请确认已连接店铺服务器。`;
+        Alert.alert('识别失败', reason);
+        return;
+      }
+      const data = res.json?.data;
+      // 后端业务错误（如腾讯云密钥缺失、识别异常）：HTTP 200 但 code!=0，明确提示而非静默空过。
+      if (res.json && res.json.code && res.json.code !== 0) {
+        Alert.alert('识别失败', res.json.msg || '服务端识别异常，请稍后重试');
+        return;
+      }
+      const text = data?.text || '';
+      if (!text) {
+        Alert.alert('识别完成', '未从照片中识别出文字，请确认单据清晰后重试，或手动录入。');
+        return;
+      }
+      const bill = parsePurchaseBill(text);
+      // 单据号：仅当当前仍是默认生成的 DD- 占位时才覆盖
+      if (bill.orderNo && /^DD-/.test(orderNo)) setOrderNo(bill.orderNo);
+      if (bill.supplierName) {
+        // 自动带出：用识别出的简称（如「金达」）去供应商列表模糊匹配，
+        // 命中则填回全称（如「金达商贸有限公司」），没命中则保留简称，由用户手选/手动补全
+        const s = bill.supplierName;
+        setSupplierName(s);
+        const match = supplierList.find((n) => n === s || n.includes(s) || s.includes(n));
+        if (match) setSupplierName(match);
+      }
+      if (bill.date) setPurchaseDate(bill.date);
+      if (bill.arrivalDate) setArrivalDate(bill.arrivalDate);
+      if (bill.total != null && !totalAmountInput) setTotalAmountInput(String(bill.total));
+      if (bill.paid != null && !paidAmount) setPaidAmount(String(bill.paid));
+      if (bill.discount != null && !discount) setDiscount(String(bill.discount));
+      if (bill.note) setNote(bill.note);
+      // OCR 回填供应商/进货日期后，把照片重命名为规范「供应商_进货日期_序号.jpg」
+      // （录单据模式拍照时供应商常为空，文件先以「单据」占位，这里纠正）。
+      const finalSupplier = bill.supplierName || supplierName;
+      // 文件名日期优先用 OCR 识别出的单据日期，单据日期才是业务归档日期；
+      // React setState 异步，purchaseDate 这里可能还是拍照当天的旧值。
+      const finalDate = bill.date || purchaseDate || today;
+      const canonicalUri = await renameToCanonical(uri, finalSupplier, finalDate);
+      if (canonicalUri !== uri) {
+        setImages((prev) => prev.map((u) => (u === uri ? canonicalUri : u)));
+      }
+      // 「录单据 / 其他」模式下识别：只回填单头字段，绝不切到商品明细模式
+      // （用户反馈：用录单据方式识别时不应跳转到商品明细录入）。
+      // 仅当用户当前已选「商品明细」模式，才把识别出的明细行回填进去。
+      // 每条明细绑定照片 URI：重新识别同一张照片时只替换该照片组，避免重复追加。
+      if (bill.items.length > 0 && entryMode === 'detail') {
+        const targetUri = canonicalUri || uri;
+        const parsedRows = bill.items.map((it) => ({
+          barcode: it.barcode || '',
+          name: it.name,
+          quantity: it.quantity != null ? String(it.quantity) : '',
+          unit: it.unit || '',
+          price: it.price != null ? String(it.price) : '',
+          imageUri: targetUri,
+        }));
+        setItems((prev) => {
+          const onlyBlankManual =
+            prev.length === 1 &&
+            !prev[0].imageUri &&
+            !prev[0].name &&
+            !prev[0].barcode &&
+            !prev[0].quantity &&
+            !prev[0].price;
+          const kept = onlyBlankManual ? [] : prev.filter((it) => it.imageUri !== targetUri && it.imageUri !== uri);
+          return [...kept, ...parsedRows];
+        });
+        // 自动展开当前照片组，方便用户立即核对
+        setCollapsedGroups((prev) => {
+          const next = new Set(prev);
+          next.delete(targetUri);
+          next.delete(uri);
+          return next;
+        });
+      }
+      const tips: string[] = [];
+      if (bill.items.length === 0) tips.push('未解析出商品明细，请手动补充');
+      // 明细缺数量/单价的行：拍照裁切或折行常导致这几列丢失
+      const incomplete = bill.items.filter((it) => it.quantity == null || it.price == null).length;
+      if (incomplete > 0) tips.push(`${incomplete} 条明细缺数量或单价，请补齐`);
+      // 票面合计与明细求和对不上 → 大概率漏行，明确告知差额而不是静默通过
+      if (bill.total != null && bill.itemsTotal != null && Math.abs(bill.total - bill.itemsTotal) > 0.01) {
+        const diff = Math.abs(bill.total - bill.itemsTotal).toFixed(2);
+        tips.push(`票面合计 ¥${bill.total.toFixed(2)} 与明细合计 ¥${bill.itemsTotal.toFixed(2)} 差 ¥${diff}，可能有漏行`);
+      }
+      Alert.alert('识别完成', '已自动回填，请核对修正。' + (tips.length ? '\n' + tips.join('；') : ''));
+    } catch (e: any) {
+      Alert.alert('识别失败', e?.message || '请确认已连接店铺服务器（含腾讯云密钥的 3001 后端）。');
+    } finally {
+      setRecognizing(false);
+    }
+  };
+
+  // 读本地图片文件为 base64 字符串（不带头部的纯 base64）
+  const readFileAsBase64 = async (uri: string): Promise<string> => {
+    try {
+      return await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+    } catch (e: any) {
+      console.warn('[EntryForm] readFileAsBase64 failed', e?.message || e);
+      throw new Error('读取照片失败');
     }
   };
 
@@ -251,6 +500,7 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
       images: JSON.stringify(images),
       purchaseDate: billDate,
       stockStatus,
+      saveToStockIn: saveToStockIn ? 1 : 0,
     };
     // 保存 = 只写本机 SQLite，全程同步、零 await、不碰网络。
     // 店里电脑关机、手机用 4G、完全飞行模式，这一步的行为都完全一样。
@@ -267,6 +517,7 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
           id: draftId,
           paid: 0,
           deviceId: DEVICE_ID,
+          category: '',
           ...common,
         });
       }
@@ -280,6 +531,22 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
   const detailTotal = items.reduce((s, it) => s + (Number(it.quantity) || 0) * (Number(it.price) || 0), 0);
   const totalForCalc = entryMode === 'detail' ? detailTotal : (Number(totalAmountInput) || 0);
   const unpaid = totalForCalc - (Number(paidAmount) || 0) - (Number(discount) || 0);
+
+  // 商品明细按照片 URI 分组；imageUri 为空的归为「手动添加」组
+  const groups = useMemo(() => {
+    const map = new Map<string, { uri: string; entries: { item: ItemRow; globalIdx: number }[] }>();
+    items.forEach((it, globalIdx) => {
+      const uri = it.imageUri || '';
+      if (!map.has(uri)) map.set(uri, { uri, entries: [] });
+      map.get(uri)!.entries.push({ item: it, globalIdx });
+    });
+    return Array.from(map.values()).map((g) => {
+      const isManual = !g.uri;
+      const pageNo = isManual ? 0 : images.indexOf(g.uri) + 1;
+      const fileName = isManual ? '' : (g.uri.split('/').pop() || '');
+      return { ...g, isManual, pageNo, fileName };
+    });
+  }, [items, images]);
 
   return (
     <View style={styles.root}>
@@ -381,85 +648,148 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
         {entryMode === 'detail' ? (
           <>
             <Text style={styles.label}>商品明细</Text>
-            {items.map((it, i) => (
-              <View key={i} style={styles.itemCard}>
-                <View style={styles.itemRow}>
-                  <View style={[styles.cellWrap, styles.cellBarcode]}>
-                    <Text style={styles.cellLabel}>条码</Text>
-                    <TextInput
-                      style={styles.cell}
-                      placeholder="条码"
-                      value={it.barcode}
-                      onChangeText={(v) => updateItem(i, 'barcode', v)}
-                    />
+            {groups.map((group) => {
+              const collapsed = collapsedGroups.has(group.uri);
+              const groupSubtotal = group.entries.reduce(
+                (s, e) => s + (Number(e.item.quantity) || 0) * (Number(e.item.price) || 0),
+                0
+              );
+              return (
+                <View key={group.uri || 'manual'} style={styles.groupCard}>
+                  <View style={styles.groupHeader}>
+                    <View style={styles.groupTitleWrap}>
+                      <Text style={styles.groupTitle}>
+                        {group.isManual ? '手动添加' : group.pageNo > 0 ? `第 ${group.pageNo} 页` : '照片'}
+                        {!group.isManual && group.fileName ? ` · ${group.fileName}` : ''}
+                      </Text>
+                      <Text style={styles.groupCount}>
+                        {group.entries.length} 件商品 · 本页小计 ¥{groupSubtotal.toFixed(2)}
+                      </Text>
+                    </View>
+                    <View style={styles.groupActions}>
+                      {!group.isManual && (
+                        <TouchableOpacity
+                          onPress={() => handleRetake(group.uri)}
+                          disabled={recognizing}
+                          hitSlop={{ top: 4, bottom: 4, left: 8, right: 8 }}
+                        >
+                          <Text style={[styles.groupActionText, recognizing && { opacity: 0.5 }]}>重新拍照识别</Text>
+                        </TouchableOpacity>
+                      )}
+                      <TouchableOpacity
+                        onPress={() => toggleGroup(group.uri)}
+                        hitSlop={{ top: 4, bottom: 4, left: 8, right: 8 }}
+                      >
+                        <Text style={styles.groupToggle}>{collapsed ? '展开' : '折叠'}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                  <View style={[styles.cellWrap, styles.cellName]}>
-                    <Text style={styles.cellLabel}>名称</Text>
-                    <TextInput
-                      style={styles.cell}
-                      placeholder="名称"
-                      value={it.name}
-                      onChangeText={(v) => updateItem(i, 'name', v)}
-                    />
-                  </View>
-                  {items.length > 1 && (
-                    // M3：删除是破坏性操作，热区必须够大（原来仅约 26×26）
-                    <TouchableOpacity
-                      style={styles.delBtn}
-                      onPress={() => removeItem(i)}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      accessibilityRole="button"
-                      accessibilityLabel={`删除第 ${i + 1} 行商品`}
-                    >
-                      <Text style={styles.del}>×</Text>
-                    </TouchableOpacity>
+                  {!collapsed && (
+                    <>
+                      {group.entries.map(({ item: it, globalIdx }) => (
+                        <View key={globalIdx} style={styles.itemCard}>
+                          <View style={styles.itemRow}>
+                            <View style={[styles.cellWrap, styles.cellBarcode]}>
+                              <Text style={styles.cellLabel}>条码</Text>
+                              <TextInput
+                                style={styles.cell}
+                                placeholder="条码"
+                                value={it.barcode}
+                                onChangeText={(v) => updateItem(globalIdx, 'barcode', v)}
+                              />
+                            </View>
+                            <View style={[styles.cellWrap, styles.cellName]}>
+                              <Text style={styles.cellLabel}>名称</Text>
+                              <TextInput
+                                style={styles.cell}
+                                placeholder="名称"
+                                value={it.name}
+                                onChangeText={(v) => updateItem(globalIdx, 'name', v)}
+                              />
+                            </View>
+                            {items.length > 1 && (
+                              <TouchableOpacity
+                                style={styles.delBtn}
+                                onPress={() => removeItem(globalIdx)}
+                                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                accessibilityRole="button"
+                                accessibilityLabel={`删除第 ${globalIdx + 1} 行商品`}
+                              >
+                                <Text style={styles.del}>×</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                          <View style={styles.itemRow}>
+                            <View style={[styles.cellWrap, styles.cellQty]}>
+                              <Text style={styles.cellLabel}>数量</Text>
+                              <TextInput
+                                style={styles.cell}
+                                placeholder="数量"
+                                value={it.quantity}
+                                onChangeText={(v) => updateItem(globalIdx, 'quantity', v)}
+                                keyboardType="numeric"
+                              />
+                            </View>
+                            <View style={[styles.cellWrap, styles.cellUnit]}>
+                              <Text style={styles.cellLabel}>单位</Text>
+                              <TextInput
+                                style={styles.cell}
+                                placeholder="单位"
+                                value={it.unit}
+                                onChangeText={(v) => updateItem(globalIdx, 'unit', v)}
+                              />
+                            </View>
+                            <View style={[styles.cellWrap, styles.cellPrice]}>
+                              <Text style={styles.cellLabel}>单价</Text>
+                              <TextInput
+                                style={styles.cell}
+                                placeholder="单价"
+                                value={it.price}
+                                onChangeText={(v) => updateItem(globalIdx, 'price', v)}
+                                keyboardType="numeric"
+                              />
+                            </View>
+                            <View style={[styles.cellWrap, styles.cellAmount]}>
+                              <Text style={styles.cellLabel}>金额</Text>
+                              <Text style={styles.itemAmount}>
+                                ¥{((Number(it.quantity) || 0) * (Number(it.price) || 0)).toFixed(2)}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      ))}
+                      <TouchableOpacity style={styles.addRowGroup} onPress={() => addItemToGroup(group.uri)}>
+                        <Text style={styles.addText}>＋ 在本组添加一行</Text>
+                      </TouchableOpacity>
+                      <View style={styles.groupFooter}>
+                        <Text style={styles.groupFooterLabel}>本页小计</Text>
+                        <Text style={styles.groupFooterValue}>¥{groupSubtotal.toFixed(2)}</Text>
+                      </View>
+                    </>
                   )}
                 </View>
-                <View style={styles.itemRow}>
-                  <View style={[styles.cellWrap, styles.cellQty]}>
-                    <Text style={styles.cellLabel}>数量</Text>
-                    <TextInput
-                      style={styles.cell}
-                      placeholder="数量"
-                      value={it.quantity}
-                      onChangeText={(v) => updateItem(i, 'quantity', v)}
-                      keyboardType="numeric"
-                    />
-                  </View>
-                  <View style={[styles.cellWrap, styles.cellUnit]}>
-                    <Text style={styles.cellLabel}>单位</Text>
-                    <TextInput
-                      style={styles.cell}
-                      placeholder="单位"
-                      value={it.unit}
-                      onChangeText={(v) => updateItem(i, 'unit', v)}
-                    />
-                  </View>
-                  <View style={[styles.cellWrap, styles.cellPrice]}>
-                    <Text style={styles.cellLabel}>单价</Text>
-                    <TextInput
-                      style={styles.cell}
-                      placeholder="单价"
-                      value={it.price}
-                      onChangeText={(v) => updateItem(i, 'price', v)}
-                      keyboardType="numeric"
-                    />
-                  </View>
-                  <View style={[styles.cellWrap, styles.cellAmount]}>
-                    <Text style={styles.cellLabel}>金额</Text>
-                    <Text style={styles.itemAmount}>
-                      ¥{((Number(it.quantity) || 0) * (Number(it.price) || 0)).toFixed(2)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            ))}
+              );
+            })}
             <TouchableOpacity style={styles.addRow} onPress={addItem}>
               <Text style={styles.addText}>＋ 增加一行</Text>
             </TouchableOpacity>
 
             <Text style={styles.label}>总金额（明细自动合计）</Text>
             <Text style={styles.readonlyValue}>¥{detailTotal.toFixed(2)}</Text>
+
+            <View style={styles.switchRow}>
+              <View style={styles.switchTextWrap}>
+                <Text style={styles.switchLabel}>保存为入库单</Text>
+                <Text style={styles.switchHint}>同步到后端时自动生成入库单（已入库）</Text>
+              </View>
+              <Switch
+                value={saveToStockIn}
+                onValueChange={setSaveToStockIn}
+                trackColor={{ false: theme.color.border, true: theme.color.primaryVivid }}
+                thumbColor="#fff"
+                style={styles.switchCtrl}
+              />
+            </View>
           </>
         ) : (
           <>
@@ -513,7 +843,7 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
           <Text style={styles.cameraText}>📷 拍照（{images.length} 张）</Text>
         </TouchableOpacity>
         {images.map((u, i) => (
-          <Text key={i} style={styles.imgPath} numberOfLines={1}>
+          <Text key={u + i} style={styles.imgPath} numberOfLines={1}>
             · {u.split('/').pop()}
           </Text>
         ))}
@@ -525,24 +855,34 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
         camBar 原本只有 24pt 内边距，iOS 34pt Home Indicator 会压住「关闭 / 拍摄」，
         拍完退不出来 —— 功能性死锁。这里手动补 BOTTOM_INSET。
       */}
-      <Modal visible={cameraOpen} animationType="slide" onRequestClose={() => setCameraOpen(false)}>
+      <Modal visible={cameraOpen} animationType="slide" onRequestClose={() => { setRetakeUri(null); setCameraOpen(false); }}>
         <View style={styles.camWrap}>
           <CameraView style={styles.cam} ref={camRef} pictureSize={pictureSize} onCameraReady={onCameraReady} />
+          <ScanFrame variant="sheet" title="将送货单放入框内，对齐边缘" subtitle="自动识别 供应商 / 单号 / 金额 / 日期" />
           <View style={styles.camBar}>
-            <TouchableOpacity onPress={() => setCameraOpen(false)}>
+            <TouchableOpacity onPress={() => { setRetakeUri(null); setCameraOpen(false); }}>
               <Text style={styles.camBtn}>关闭</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={onCapture}>
+            <TouchableOpacity onPress={() => onCapture(false)} disabled={recognizing}>
               <Text style={styles.camShoot}>● 拍摄</Text>
             </TouchableOpacity>
+            <TouchableOpacity onPress={() => onCapture(true)} disabled={recognizing}>
+              <Text style={styles.camShoot}>识别</Text>
+            </TouchableOpacity>
           </View>
+          {recognizing ? (
+            <View style={styles.camLoading}>
+              <Text style={{ color: '#fff' }}>识别中…</Text>
+            </View>
+          ) : null}
         </View>
       </Modal>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bg },
   flex: { flex: 1 },
   header: {
@@ -599,7 +939,32 @@ const styles = StyleSheet.create({
   },
   // M4：「＋ 增加一行」原来约 30pt，抬到 44pt
   addRow: { minHeight: theme.size.tapMin, justifyContent: 'center', paddingVertical: theme.space(1) },
+  addRowGroup: { minHeight: theme.size.tapMin, justifyContent: 'center', paddingVertical: theme.space(0.5) },
   addText: { color: theme.color.primaryVivid, fontSize: theme.font.size.sm },
+  groupCard: {
+    backgroundColor: theme.color.surfaceRaised, borderRadius: theme.radius.md, borderWidth: 1,
+    borderColor: theme.color.border, padding: theme.space(1), marginBottom: theme.space(1),
+  },
+  groupHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: theme.space(0.75), paddingHorizontal: theme.space(0.5),
+  },
+  groupTitleWrap: { flex: 1, marginRight: theme.space(1) },
+  groupTitle: { fontSize: theme.font.size.sm, color: theme.color.text, fontWeight: theme.font.weight.medium },
+  groupCount: { fontSize: theme.font.size.xs, color: theme.color.textMuted, marginTop: 2 },
+  groupActions: { flexDirection: 'row', alignItems: 'center', gap: theme.space(1.5) },
+  groupActionText: { fontSize: theme.font.size.xs, color: theme.color.primaryVivid },
+  groupToggle: { fontSize: theme.font.size.xs, color: theme.color.textSecondary },
+  groupFooter: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: theme.space(0.5), paddingTop: theme.space(1), paddingHorizontal: theme.space(0.5),
+    borderTopWidth: 1, borderTopColor: theme.color.border,
+  },
+  groupFooterLabel: { fontSize: theme.font.size.sm, color: theme.color.textSecondary, fontWeight: theme.font.weight.medium },
+  groupFooterValue: {
+    fontSize: theme.font.size.md, color: theme.color.text, fontWeight: theme.font.weight.bold,
+    fontVariant: ['tabular-nums'],
+  },
   itemCard: {
     backgroundColor: theme.color.surfaceRaised, borderRadius: theme.radius.md, borderWidth: 1,
     borderColor: theme.color.border, padding: theme.space(1), marginBottom: theme.space(1),
@@ -629,7 +994,27 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: theme.color.borderApp,
   },
   cameraText: { color: theme.color.primaryVivid, fontSize: theme.font.size.md, fontWeight: theme.font.weight.medium },
-  imgPath: { fontSize: theme.font.size.xs, color: theme.color.textMuted, marginTop: 2 },
+  imgPath: { fontSize: theme.font.size.xs, color: theme.color.textMuted, marginTop: 2, flex: 1, marginRight: theme.space(1) },
+  imgRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: theme.space(0.5),
+  },
+  reRecognizeBtn: {
+    paddingHorizontal: theme.space(1), paddingVertical: theme.space(0.25),
+    borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceSunken,
+    borderWidth: 1, borderColor: theme.color.border,
+  },
+  reRecognizeText: { fontSize: theme.font.size.xs, color: theme.color.primaryVivid },
+  // 「保存为入库单」开关行：左文案右开关，与录入方式分段控件同款底色
+  switchRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: theme.color.surfaceSunken, borderRadius: theme.radius.md,
+    paddingVertical: theme.space(1), paddingHorizontal: theme.space(1.5), marginTop: theme.space(1.5),
+  },
+  switchTextWrap: { flex: 1, marginRight: theme.space(1) },
+  switchLabel: { fontSize: theme.font.size.md, color: theme.color.text, fontWeight: theme.font.weight.medium },
+  switchHint: { fontSize: theme.font.size.xs, color: theme.color.textMuted, marginTop: 2 },
+  switchCtrl: { transform: [{ scaleX: 0.9 }, { scaleY: 0.9 }] },
   camWrap: { flex: 1, backgroundColor: '#000' },
   cam: { flex: 1 },
   camBar: {
@@ -641,4 +1026,9 @@ const styles = StyleSheet.create({
   },
   camBtn: { color: '#fff', fontSize: theme.font.size.md, minHeight: theme.size.tapMin, textAlignVertical: 'center' },
   camShoot: { color: theme.color.primary, fontSize: theme.font.size.lg, fontWeight: theme.font.weight.bold },
+  camLoading: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, alignItems: 'center',
+    paddingBottom: BOTTOM_INSET + theme.spaceScale[10], backgroundColor: 'rgba(0,0,0,0.45)',
+  },
 });
+}

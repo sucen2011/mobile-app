@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { theme } from '../theme';
+import { useTheme } from '../theme/ThemeProvider';
 import { BarChart } from '../components/Charts';
 import { SyncBadge } from '../components/SyncUI';
 import { getCachedPurchases, getCachedRevenues, getLastSync, getDayOffset } from '../db/localDb';
@@ -25,6 +25,8 @@ function weekStart(offset: number) {
 }
 
 export default function ReportScreen({ sync }: Props) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const [scope, setScope] = useState<Scope>('today');
   const offset = getDayOffset();
 
@@ -132,6 +134,8 @@ export default function ReportScreen({ sync }: Props) {
 }
 
 function Metric({ label, value, color }: { label: string; value: string; color: string }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   return (
     <View style={styles.metric}>
       <Text style={styles.metricLabel}>{label}</Text>
@@ -140,6 +144,8 @@ function Metric({ label, value, color }: { label: string; value: string; color: 
   );
 }
 function Legend({ color, text }: { color: string; text: string }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   return (
     <View style={styles.legendItem}>
       <View style={[styles.legendDot, { backgroundColor: color }]} />
@@ -148,8 +154,9 @@ function Legend({ color, text }: { color: string; text: string }) {
   );
 }
 
-const S = theme.size;
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  const S = theme.size;
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bgApp },
   content: { padding: theme.spaceScale[4], paddingBottom: 32 },
   topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: theme.spaceScale[3] },
@@ -172,3 +179,4 @@ const styles = StyleSheet.create({
   legendText: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppSecondary },
   syncNote: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginTop: theme.spaceScale[4], textAlign: 'center' },
 });
+}

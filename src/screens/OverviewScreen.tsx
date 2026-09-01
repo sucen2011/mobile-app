@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { theme } from '../theme';
+import { useTheme } from '../theme/ThemeProvider';
 import { SyncBadge } from '../components/SyncUI';
 import { MiniTrend } from '../components/Charts';
 import { getCachedPurchases, getCachedRevenues, getDayOffset } from '../db/localDb';
@@ -21,6 +21,8 @@ function monthPrefix() {
 }
 
 export default function OverviewScreen({ sync, onNavigate, onOpenDetail }: Props) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const offset = getDayOffset();
   const data = useMemo(() => {
     const purchases = getCachedPurchases();
@@ -114,7 +116,7 @@ export default function OverviewScreen({ sync, onNavigate, onOpenDetail }: Props
                 <Text style={styles.recSub} numberOfLines={1}>
                   {r.sub}
                 </Text>
-                <Text style={styles.recDate}>{formatDayLabel(r.date, offset)}</Text>
+                <Text style={styles.recDate}>{formatDayLabel(r.date, 0)}</Text>
               </View>
               <Text
                 style={[
@@ -133,7 +135,7 @@ export default function OverviewScreen({ sync, onNavigate, onOpenDetail }: Props
         <View style={styles.emptyState}>
           <Text style={styles.emptyTitle}>还没有记录</Text>
           <Text style={styles.emptyText}>去录一笔进货单吧</Text>
-          <TouchableOpacity style={styles.emptyCta} onPress={() => onNavigate('entry')}>
+          <TouchableOpacity style={styles.emptyCta} onPress={() => onNavigate('business')}>
             <Text style={[styles.emptyCtaText, { color: theme.color.primaryVivid }]}>前往录单 →</Text>
           </TouchableOpacity>
         </View>
@@ -143,6 +145,8 @@ export default function OverviewScreen({ sync, onNavigate, onOpenDetail }: Props
 }
 
 function Kpi({ label, value, color }: { label: string; value: string; color: string }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   return (
     <View style={styles.kpi}>
       <Text style={styles.kpiLabel}>{label}</Text>
@@ -151,8 +155,9 @@ function Kpi({ label, value, color }: { label: string; value: string; color: str
   );
 }
 
-const S = theme.size;
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  const S = theme.size;
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bgApp },
   content: { padding: theme.spaceScale[4], paddingBottom: 32 },
   topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: theme.spaceScale[4] },
@@ -196,3 +201,4 @@ const styles = StyleSheet.create({
   emptyCta: { marginTop: theme.spaceScale[4], paddingVertical: theme.spaceScale[2] },
   emptyCtaText: { fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.medium },
 });
+}

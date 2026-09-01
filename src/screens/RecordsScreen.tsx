@@ -1,10 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
-import { theme } from '../theme';
+import { useTheme } from '../theme/ThemeProvider';
 import {
   getCachedPurchases,
   getCachedRevenues,
-  getDayOffset,
   getAllDrafts,
   getAllRevenueDrafts,
 } from '../db/localDb';
@@ -16,6 +15,7 @@ type RecordKind = 'revenue' | 'purchase' | 'draft' | 'revenueDraft';
 interface Props {
   sync: SyncState;
   onOpenDetail: (rec: { kind: RecordKind; id: string }) => void;
+  embedded?: boolean;
 }
 
 type Filter = 'all' | 'purchase' | 'revenue';
@@ -26,6 +26,7 @@ interface Row {
   kind: RecordKind;
   id: string;
   date: string;
+  createdAt?: number;
   title: string;
   sub: string;
   amount: number;
@@ -40,15 +41,29 @@ const ROW_STATUS_TEXT: Record<RowStatus, string> = {
   synced: '已同步',
 };
 
-const ROW_STATUS_COLOR: Record<RowStatus, string> = {
-  pending: theme.color.statusPending,
-  syncing: theme.color.statusSyncing,
-  conflict: theme.color.statusConflict,
-  synced: theme.color.statusSynced,
-};
+function rowStatusColor(s: RowStatus, theme: any): string {
+  return {
+    pending: theme.color.statusPending,
+    syncing: theme.color.statusSyncing,
+    conflict: theme.color.statusConflict,
+    synced: theme.color.statusSynced,
+  }[s];
+}
 
-export default function RecordsScreen({ sync, onOpenDetail }: Props) {
-  const offset = getDayOffset();
+// 本地草稿带毫秒时间戳，显示到「月-日 时:分」；同步下来的记录只有日期，走友好口径。
+function formatRowTime(date: string, createdAt?: number): string {
+  if (createdAt) {
+    const d = new Date(createdAt);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  // 最近记录列表用真实日历口径：26 日就是昨日，25 日就是前日，不套营业日偏移。
+  return formatDayLabel(date, 0);
+}
+
+export default function RecordsScreen({ sync, onOpenDetail, embedded }: Props) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const [filter, setFilter] = useState<Filter>('all');
   const [keyword, setKeyword] = useState('');
 
@@ -63,12 +78,12 @@ export default function RecordsScreen({ sync, onOpenDetail }: Props) {
     for (const d of getAllDrafts()) {
       // 用草稿的真实状态，不要再写死 'pending'。
       // 写死会让「明细」永远显示待同步，而概览的计数走的是另一套口径，两边就对不上了。
-      list.push({ kind: 'draft', id: d.id, date: d.date, title: d.supplierName || '进货草稿', sub: `草稿 ${d.orderNo}`, amount: d.totalAmount, amountColor: theme.color.expense, status: d.status });
+      list.push({ kind: 'draft', id: d.id, date: d.date, createdAt: d.createdAt, title: d.supplierName || '进货草稿', sub: `草稿 ${d.orderNo}`, amount: d.totalAmount, amountColor: theme.color.expense, status: d.status });
     }
     // 离线记的营收：服务端还没有这条，只能从本机草稿表出。
     // 不列出来的话，店主离线记完账在明细里一片空白，会以为没记上、然后重复再记一遍。
     for (const r of getAllRevenueDrafts()) {
-      list.push({ kind: 'revenueDraft', id: r.id, date: r.date, title: '营业收款', sub: r.note || '营收草稿', amount: r.total, amountColor: theme.color.income, status: r.status });
+      list.push({ kind: 'revenueDraft', id: r.id, date: r.date, createdAt: r.createdAt, title: '营业收款', sub: r.note || '营收草稿', amount: r.total, amountColor: theme.color.income, status: r.status });
     }
     list.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
     return list;
@@ -83,12 +98,39 @@ export default function RecordsScreen({ sync, onOpenDetail }: Props) {
     return true;
   });
 
-  return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <Text style={styles.title}>明细</Text>
+  const listInner =
+    filtered.length === 0 ? (
+      <View style={styles.empty}>
+        <Text style={styles.emptyText}>暂无记录</Text>
       </View>
+    ) : (
+      filtered.map((r) => {
+        const isRevenueKind = r.kind === 'revenue' || r.kind === 'revenueDraft';
+        return (
+          <TouchableOpacity key={r.kind + r.id} style={styles.row} onPress={() => onOpenDetail(r)}>
+            <View style={[styles.icon, { backgroundColor: isRevenueKind ? theme.color.income : theme.color.expense }]}>
+              <Text style={styles.iconText}>{isRevenueKind ? '收' : '进'}</Text>
+            </View>
+            <View style={styles.main}>
+              <Text style={styles.rowTitle} numberOfLines={1}>{r.title}</Text>
+              <Text style={styles.rowSub} numberOfLines={1}>{r.sub}</Text>
+              <Text style={styles.rowTime} numberOfLines={1}>{formatRowTime(r.date, r.createdAt)}</Text>
+            </View>
+            <View style={styles.right}>
+              <Text style={[styles.amount, { color: r.amountColor, fontFamily: theme.font.family.num }]}>
+                {isRevenueKind ? '+' : '-'}¥{r.amount.toFixed(2)}
+              </Text>
+              <View style={[styles.badge, { backgroundColor: rowStatusColor(r.status, theme) }]}>
+                <Text style={styles.badgeText}>{ROW_STATUS_TEXT[r.status]}</Text>
+              </View>
+            </View>
+          </TouchableOpacity>
+        );
+      })
+    );
 
+  const body = (
+    <>
       <View style={styles.searchWrap}>
         <TextInput
           style={styles.search}
@@ -113,42 +155,28 @@ export default function RecordsScreen({ sync, onOpenDetail }: Props) {
         ))}
       </View>
 
-      <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
-        {filtered.length === 0 ? (
-          <View style={styles.empty}>
-            <Text style={styles.emptyText}>暂无记录</Text>
-          </View>
-        ) : (
-          filtered.map((r) => {
-            const isRevenueKind = r.kind === 'revenue' || r.kind === 'revenueDraft';
-            return (
-            <TouchableOpacity key={r.kind + r.id} style={styles.row} onPress={() => onOpenDetail(r)}>
-              <View style={[styles.icon, { backgroundColor: isRevenueKind ? theme.color.income : theme.color.expense }]}>
-                <Text style={styles.iconText}>{isRevenueKind ? '收' : '进'}</Text>
-              </View>
-              <View style={styles.main}>
-                <Text style={styles.rowTitle} numberOfLines={1}>{r.title}</Text>
-                <Text style={styles.rowSub} numberOfLines={1}>{r.sub}</Text>
-              </View>
-              <View style={styles.right}>
-                <Text style={[styles.amount, { color: r.amountColor, fontFamily: theme.font.family.num }]}>
-                  {isRevenueKind ? '+' : '-'}¥{r.amount.toFixed(2)}
-                </Text>
-                <View style={[styles.badge, { backgroundColor: ROW_STATUS_COLOR[r.status] }]}>
-                  <Text style={styles.badgeText}>{ROW_STATUS_TEXT[r.status]}</Text>
-                </View>
-              </View>
-            </TouchableOpacity>
-            );
-          })
-        )}
-      </ScrollView>
+      {embedded ? (
+        <View style={styles.listContent}>{listInner}</View>
+      ) : (
+        <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>{listInner}</ScrollView>
+      )}
+    </>
+  );
+
+  if (embedded) return <View>{body}</View>;
+  return (
+    <View style={styles.root}>
+      <View style={styles.header}>
+        <Text style={styles.title}>明细</Text>
+      </View>
+      {body}
     </View>
   );
 }
 
-const S = theme.size;
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  const S = theme.size;
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bgApp },
   header: { paddingHorizontal: theme.spaceScale[4], paddingTop: theme.spaceScale[4], paddingBottom: theme.spaceScale[2] },
   title: { fontSize: theme.font.sizeV4.h2, fontWeight: theme.font.weight.bold, color: theme.color.textApp },
@@ -185,6 +213,7 @@ const styles = StyleSheet.create({
   main: { flex: 1 },
   rowTitle: { fontSize: theme.font.sizeV4.bodyLg, color: theme.color.textApp },
   rowSub: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginTop: 2 },
+  rowTime: { fontSize: theme.font.sizeV4.micro, color: theme.color.textAppTertiary, marginTop: 2, fontFamily: theme.font.family.num },
   right: { alignItems: 'flex-end' },
   amount: { fontSize: theme.font.sizeV4.amount, fontWeight: theme.font.weight.semibold },
   badge: { marginTop: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: theme.radius.sm },
@@ -192,3 +221,4 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingVertical: theme.spaceScale[10] },
   emptyText: { fontSize: theme.font.sizeV4.body, color: theme.color.textAppTertiary },
 });
+}

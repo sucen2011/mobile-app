@@ -15,7 +15,7 @@ import {
   BackHandler,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
-import { theme } from '../theme';
+import { useTheme } from '../theme/ThemeProvider';
 import {
   getCachedPurchases,
   getCachedRevenues,
@@ -41,11 +41,6 @@ interface Props {
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 /** 等宽三列网格：页面内边距 16*2 + 卡片内边距 16*2 + 两道 8pt 间隙 */
-const GRID_GAP = theme.spaceScale[2];
-const CELL_W = Math.max(
-  72,
-  Math.floor((SCREEN_W - theme.spaceScale[4] * 4 - GRID_GAP * 2) / 3)
-);
 
 /** 图片列表轮询间隔：只拉元数据，不预下载二进制 */
 const POLL_MS = 10000;
@@ -170,6 +165,8 @@ function clamp(v: number, min: number, max: number): number {
  * 不依赖 gesture-handler / reanimated，避免原生链接风险。
  */
 function ZoomableImage({ uri }: { uri: string }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const scale = useRef(new Animated.Value(1)).current;
   const translate = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const natural = useRef({ w: SCREEN_W, h: SCREEN_H });
@@ -282,6 +279,8 @@ function ZoomableImage({ uri }: { uri: string }) {
 }
 
 export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   // ⚠️ hooks 必须全部声明在分支之前，不能塞进 if/else 里
   const [metas, setMetas] = useState<ImageMeta[] | null>(null);
   const [imgLoading, setImgLoading] = useState(false);
@@ -744,6 +743,8 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
 }
 
 function Line({ label, value, color }: { label: string; value: string; color?: string }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   return (
     <View style={styles.line}>
       <Text style={styles.lineLabel}>{label}</Text>
@@ -777,6 +778,8 @@ function ImagesBlock({
   onThumbError: (id: number) => void;
   onPress: (index: number) => void;
 }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   const n = photos.length;
   if (!loading && n === 0) return null;
   return (
@@ -867,6 +870,8 @@ function ImagesBlock({
 }
 
 function ItemsBlock({ items }: { items: any[] }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
   if (!items || items.length === 0) return null;
   return (
     <View style={styles.block}>
@@ -884,8 +889,11 @@ function ItemsBlock({ items }: { items: any[] }) {
   );
 }
 
-const S = theme.size;
-const styles = StyleSheet.create({
+function makeStyles(theme: any) {
+  const S = theme.size;
+  const GRID_GAP = theme.spaceScale[2];
+  const CELL_W = Math.max(72, Math.floor((SCREEN_W - theme.spaceScale[4] * 4 - GRID_GAP * 2) / 3));
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bgApp },
   header: {
     flexDirection: 'row',
@@ -1049,3 +1057,4 @@ const styles = StyleSheet.create({
     fontFamily: theme.font.family.num,
   },
 });
+}
