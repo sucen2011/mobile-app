@@ -42,3 +42,9 @@ yarn-error.*
 
 # Metro cache (local redirect dir, never commit)
 .expohome/
+
+# local build/debug artifacts - never commit
+app.json.backup
+eas_build4.log
+fetch_eas_log.js
+start_expo_dev.bat
