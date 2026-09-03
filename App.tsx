@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Platform, AppState } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Platform, AppState, Alert } from 'react-native';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import { DEFAULT_STORE_BASE_URL, DEVICE_ID, SYNC_INTERVAL_MS, loadDeviceId, loadBaseUrl, saveBaseUrl, refreshApiToken, loadSyncPrefs, saveSyncPrefs, loadOnboarding, saveOnboarding, type SyncPrefs } from './src/config';
 import { ThemeProvider, useTheme } from './src/theme/ThemeProvider';
@@ -190,17 +190,30 @@ function AppInner() {
   // 都是不接 catch 的浮空 promise，最终变成未捕获 rejection。
   // 更要命的是启动时 `await tickRef.current()` 的成败门控着轮询定时器的创建（见下方 effect），
   // 抛一次就再也没有自动同步了。所以这里必须自己吃掉异常，只留一行 console.warn。
-  const doSync = useCallback(async () => {
+  // manual=true 表示用户手动点了「同步全部」：这种场景必须给结果反馈。
+  // 之前失败原因只写进 syncMsg，而 syncMsg 只在首页渲染 —— 在「经营 / 草稿箱」
+  // 页点同步，成功失败都看不到任何提示，用户只会觉得「点了没反应」。
+  const doSync = useCallback(async (manual = false) => {
     if (syncingRef.current) return; // ref 闸门：并发/过期闭包都拦得住
     syncingRef.current = true;
     setSyncing(true);
     try {
-      await runSync(baseUrl, DEVICE_ID, setSyncMsg);
+      const res = await runSync(baseUrl, DEVICE_ID, setSyncMsg);
+      if (res.reason && res.reason !== 'ok') {
+        setSyncMsg(res.message || '同步未完成');
+        if (manual) Alert.alert('同步未完成', res.message || '请稍后重试');
+      } else if (res.failed > 0) {
+        setSyncMsg(res.message || '部分单据同步失败');
+        if (manual) Alert.alert('同步结束', res.message || '部分单据同步失败，稍后自动重试');
+      } else if (manual) {
+        Alert.alert('同步完成', res.message || '草稿已推送到电脑端');
+      }
       if (await isOnStoreLan()) await refreshCache();
     } catch (e: any) {
       // 后端不可达是常态（店里电脑关机），不弹窗、不打断录入，下一轮自动重试
       console.warn('[App] doSync failed, will retry next tick:', e?.message || e);
       setSyncMsg('同步未完成，稍后自动重试');
+      if (manual) Alert.alert('同步未完成', e?.message || '发生异常，稍后自动重试');
     } finally {
       syncingRef.current = false;
       setSyncing(false);
@@ -370,11 +383,11 @@ function AppInner() {
               setShowRevenue(true);
             }}
             onOpenDetail={setDetail}
-            onSyncAll={() => void doSync()}
+            onSyncAll={() => void doSync(true)}
             onRefreshPending={refreshPending}
           />
         )}
-        {tab === 'barrel' && <BarrelWaterScreen sync={sync} cacheVersion={cacheVersion} onSyncAll={() => void doSync()} />}
+        {tab === 'barrel' && <BarrelWaterScreen sync={sync} cacheVersion={cacheVersion} onSyncAll={() => void doSync(true)} />}
         {tab === 'goods' && <GoodsScreen sync={sync} cacheVersion={cacheVersion} />}
         {tab === 'mine' && (
           <Settings baseUrl={baseUrl} onBaseUrlChange={handleBaseUrlChange} onTestConnection={testConnection} sync={sync} syncPrefs={syncPrefs} onSyncPrefsChange={handleSyncPrefsChange} onLogout={handleLogout} />

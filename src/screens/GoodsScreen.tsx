@@ -273,6 +273,13 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
 
   return (
     <View>
+      {/* 数据边界说明：手机端商品走本地 SQLite，syncEngine 不做 products 上行，
+          PC 端看不到。明确写出来，避免用户以为已同步（审查报告 P1-6 / M1）。 */}
+      <View style={styles.banner}>
+        <Text style={styles.bannerText}>
+          仅本机存储：手机端新增 / 修改的商品不会同步到电脑端。商品主数据请以电脑端为准，这里用于快捷查询与临时录入。
+        </Text>
+      </View>
       <View style={styles.card}>
         <View style={styles.listHeadRow}>
           <Text style={styles.sectionTitle}>商品列表（{list.length}）</Text>
@@ -281,7 +288,7 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
           </TouchableOpacity>
         </View>
         {list.length === 0
-          ? <View style={styles.empty}><Text style={styles.emptyText}>暂无商品，可在电脑端维护后同步，或点「＋ 新增」手动录入</Text></View>
+          ? <View style={styles.empty}><Text style={styles.emptyText}>暂无商品，可在电脑端商品档案维护，或点「＋ 新增」在本机录入（不同步电脑端）</Text></View>
           : (
             <View>
               {list.map((p, i) => (
@@ -462,6 +469,16 @@ function makeStyles(theme: any) {
     empty: { backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[6], alignItems: 'center' },
     emptyText: { color: theme.color.textAppTertiary, fontSize: 14 },
     hint: { fontSize: 12, color: theme.color.textAppTertiary, lineHeight: 18, marginBottom: theme.spaceScale[3] },
+    banner: {
+      backgroundColor: theme.color.surfaceRaised,
+      borderWidth: 1,
+      borderColor: theme.color.primaryVivid,
+      borderRadius: theme.radius.card,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      marginBottom: theme.spaceScale[3],
+    },
+    bannerText: { fontSize: 12, color: theme.color.textAppSecondary, lineHeight: 18 },
     stockBig: { fontSize: 20, fontWeight: '700', fontVariant: ['tabular-nums'] },
     stockSmall: { fontSize: 11, color: theme.color.textAppTertiary, marginTop: 2 },
     subHeader: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, backgroundColor: theme.color.bgApp },

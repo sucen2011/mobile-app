@@ -38,12 +38,42 @@ function isApiJson(body: any, text: string): boolean {
 // 实际连通探测：带 token 请求 /api/revenue，必须返回合法 API JSON 才算真正连上。
 // 如果返回的是静态网页（如把前端页面端口 8081 错填成后端地址），这里会判为不可达，
 // 避免后续把所有 API 都当成“已同步”但实际没拿到数据。
-export async function isReachable(baseUrl: string): Promise<boolean> {
-  const timeout = (ms: number) =>
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), ms)
-    );
-  console.log('[syncEngine] isReachable start', baseUrl);
+export type UnreachableReason =
+  | 'unconfigured' // 服务器地址还是占位串，压根没配过
+  | 'unreachable' // 网络不通 / 超时（电脑关机、不在一个网段）
+  | 'unauthorized' // 401：token 缺失或失效（未从 /api/bootstrap 取到）
+  | 'bad-response' // 能连上但返回的不是 API JSON（典型：端口填成了前端页面/静态服务）
+  | 'error'; // 其它服务端错误（5xx）
+
+export interface ProbeResult {
+  ok: boolean;
+  reason: UnreachableReason | 'ok';
+  /** 可直接展示给用户的原因说明 */
+  message: string;
+}
+
+const REASON_MESSAGE: Record<UnreachableReason, string> = {
+  unconfigured: '尚未配置店铺服务器地址，请到「我的 → 服务器地址」填写电脑端显示的地址',
+  unreachable: '连接不上店铺服务器，请确认电脑已开机、后端已启动，且手机与电脑在同一 WiFi',
+  unauthorized: '鉴权失败（401），请在「我的 → 服务器地址」点测试连接重新获取令牌',
+  'bad-response': '服务器地址端口可能填错（返回的不是接口数据），常见是填成了前端页面端口',
+  error: '服务器返回错误，请稍后重试或检查后端日志',
+};
+
+/** 超时竞速：RN 的 fetch 不会自己超时，iOS 真机上可能静默挂起 */
+const timeout = (ms: number) =>
+  new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms));
+
+/** 占位地址特征：config.ts 里 DEFAULT_STORE_BASE_URL 的占位串，未配置时会直接拿来用 */
+function isPlaceholderUrl(baseUrl: string): boolean {
+  return !baseUrl || baseUrl.includes('<') || baseUrl.includes('电脑局域网IP');
+}
+
+/** 实际连通探测，并区分失败原因——原来一律报「未连接到店铺 WiFi」，把 401/端口填错也混进去了 */
+export async function probeConnection(baseUrl: string): Promise<ProbeResult> {
+  if (isPlaceholderUrl(baseUrl)) {
+    return { ok: false, reason: 'unconfigured', message: REASON_MESSAGE.unconfigured };
+  }
   try {
     const res = (await Promise.race([
       fetch(`${baseUrl}/api/revenue`, {
@@ -55,13 +85,28 @@ export async function isReachable(baseUrl: string): Promise<boolean> {
     const text = await res.text();
     let body: any = null;
     try { body = text ? JSON.parse(text) : null; } catch { /* ignore */ }
-    const valid = res.ok && isApiJson(body, text);
-    console.log('[syncEngine] isReachable status=', res.status, 'valid=', valid, text.slice(0, 80));
-    return valid;
+    console.log('[syncEngine] probe status=', res.status, text.slice(0, 80));
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, reason: 'unauthorized', message: REASON_MESSAGE.unauthorized };
+    }
+    if (res.status >= 500) {
+      return { ok: false, reason: 'error', message: REASON_MESSAGE.error };
+    }
+    if (!isApiJson(body, text)) {
+      return { ok: false, reason: 'bad-response', message: REASON_MESSAGE['bad-response'] };
+    }
+    if (!res.ok) {
+      return { ok: false, reason: 'error', message: REASON_MESSAGE.error };
+    }
+    return { ok: true, reason: 'ok', message: '' };
   } catch (e: any) {
-    console.log('[syncEngine] isReachable fail', e?.message || e);
-    return false;
+    console.log('[syncEngine] probe fail', e?.message || e);
+    return { ok: false, reason: 'unreachable', message: REASON_MESSAGE.unreachable };
   }
+}
+
+export async function isReachable(baseUrl: string): Promise<boolean> {
+  return (await probeConnection(baseUrl)).ok;
 }
 
 async function deleteLocalImages(images: string[]) {
@@ -78,6 +123,10 @@ export interface SyncResult {
   synced: number;
   conflict: number;
   failed: number;
+  /** 未连通时的具体原因；连通时为 'ok'（或省略，兼容旧调用方） */
+  reason?: UnreachableReason | 'ok';
+  /** 可直接展示给用户的结果说明（失败原因 / 成功汇总） */
+  message?: string;
 }
 
 // ============ 营收草稿推送 ============
@@ -162,6 +211,12 @@ async function pushRevenueDrafts(
         deleteRevenueDraft(d.id);
         synced++;
         onProgress?.(`营收 ${d.date} 已同步`);
+      } else if (res.status === 401 || res.status === 403) {
+        // 鉴权失败重试一万次也不会成功（token 由 /api/bootstrap 下发），
+        // 必须明确提示，否则用户只看到草稿一直推不出去、又没有任何原因。
+        setRevenueDraftStatus(d.id, 'pending');
+        failed++;
+        onProgress?.(`营收 ${d.date} 鉴权失败（${res.status}），请到「我的 → 服务器地址」重新测试连接`);
       } else if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 408 && res.status !== 429) {
         // 服务端明确拒绝了这份数据（字段不合法等），重试多少次都一样。
         // 标 conflict 让它在 UI 上显出来，等人工处理，别静默无限重试。
@@ -322,12 +377,14 @@ export async function runSync(
 ): Promise<SyncResult> {
   console.log('[syncEngine] runSync start', baseUrl, deviceId);
   onProgress?.('正在探测服务器连通性…');
-  const reachable = await isReachable(baseUrl);
-  console.log('[syncEngine] reachable=', reachable);
-  if (!reachable) {
-    onProgress?.('未连接到店铺 WiFi，稍后自动重试');
-    console.log('[syncEngine] abort: unreachable');
-    return { synced: 0, conflict: 0, failed: 0 };
+  const probe = await probeConnection(baseUrl);
+  console.log('[syncEngine] probe=', probe.reason, probe.ok);
+  if (!probe.ok) {
+    // 原来的「未连接到店铺 WiFi」把「没配地址 / 401 / 端口填错」全混成一句，
+    // 用户根本无从下手。这里回传可区分的原因，由调用方直接提示到 UI。
+    onProgress?.(probe.message);
+    console.log('[syncEngine] abort:', probe.reason);
+    return { synced: 0, conflict: 0, failed: 0, reason: probe.reason, message: probe.message };
   }
 
   // 先回收上一次没跑完、永久卡在 'syncing' 的孤儿草稿，再取本轮任务。
@@ -488,13 +545,13 @@ export async function runSync(
   if (totalSynced === 0 && conflict === 0 && totalFailed === 0) {
     onProgress?.('无待同步单据');
     console.log('[syncEngine] nothing to sync');
-    return { synced, conflict, failed };
+    return { synced, conflict, failed, reason: 'ok', message: '无待同步单据' };
   }
 
-  onProgress?.(
+  const summary =
     totalFailed === 0
       ? `同步完成（成功 ${totalSynced}${conflict ? `，冲突 ${conflict}` : ''}）`
-      : `同步结束：成功 ${totalSynced}，失败 ${totalFailed}`
-  );
-  return { synced: totalSynced, conflict, failed: totalFailed };
+      : `同步结束：成功 ${totalSynced}，失败 ${totalFailed}。失败的单据仍留在草稿箱，稍后自动重试`;
+  onProgress?.(summary);
+  return { synced: totalSynced, conflict, failed: totalFailed, reason: 'ok', message: summary };
 }

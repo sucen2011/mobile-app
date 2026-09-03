@@ -1,4 +1,4 @@
-import { apiFetch } from './client';
+import { apiFetch, twoStepDelete } from './client';
 import { uploadImage } from './upload';
 
 // ============ 供应商陈列费用管理：移动端 API 封装 ============
@@ -166,30 +166,15 @@ export async function updateExpense(baseUrl: string, id: number, payload: Expens
   });
 }
 
-async function requestConfirmToken(
-  baseUrl: string,
-  action: string,
-  targetType: string,
-  targetId: string,
-  targetNo: string
-): Promise<string> {
-  const d = await apiJson<{ token: string }>(baseUrl, '/api/confirm', {
-    method: 'POST',
-    body: JSON.stringify({ action, targetType, targetId, targetNo }),
-  });
-  return d.token;
-}
-
 export async function deleteExpense(baseUrl: string, e: SupplierExpense): Promise<void> {
-  const token = await requestConfirmToken(baseUrl, 'delete', 'supplier_expense', String(e.id), e.expenseNo);
-  const res = await apiFetch(`${baseUrl}/api/supplier-expenses/${e.id}`, {
-    method: 'DELETE',
-    headers: { 'X-Confirm-Token': token },
-  });
-  if (!res.ok) {
-    const m = res.json?.msg || `删除失败（HTTP ${res.status}）`;
-    throw new Error(m);
-  }
+  // 两步删除统一走 api/twoStepDelete（审查报告 P2-6：不再各模块各写一套）
+  await twoStepDelete(
+    baseUrl,
+    `/api/supplier-expenses/${e.id}`,
+    'supplier_expense',
+    e.id,
+    e.expenseNo
+  );
 }
 
 export async function reverseExpense(
