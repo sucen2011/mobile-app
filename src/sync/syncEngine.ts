@@ -15,8 +15,10 @@ import {
   deleteRevenueDraft,
   getUnsyncedBarrelPress,
   getUnsyncedBarrelRefund,
+  getUnsyncedBarrelExchange,
   markBarrelPressSynced,
   markBarrelRefundSynced,
+  markBarrelExchangeSynced,
   type RevenueDraft,
   type Draft,
 } from '../db/localDb';
@@ -362,6 +364,38 @@ export async function syncBarrelRecords(
     } catch (e: any) {
       failed++;
       onProgress?.(`退桶单 ${r.no || r.customer} 异常：${e?.message || '失败'}`);
+    }
+  }
+
+  // ---- 上行：换桶 ----
+  for (const x of getUnsyncedBarrelExchange()) {
+    try {
+      onProgress?.(`同步换桶单 ${x.no || x.customer}…`);
+      const res = await apiFetch(`${baseUrl}/api/barrel/exchange`, {
+        method: 'POST',
+        body: JSON.stringify({
+          no: x.no,
+          customer: x.customer,
+          phone: x.phone || undefined,
+          date: x.date,
+          oldItems: (x.oldItems || []).map((i) => ({ barrel: i.barrel, count: i.count })),
+          newItems: (x.newItems || []).map((i) => ({ barrel: i.barrel, count: i.count })),
+          oldDepositTotal: x.oldDepositTotal,
+          newDepositTotal: x.newDepositTotal,
+          diff: x.diff,
+        }),
+      });
+      if (res.ok && res.json?.code === 0) {
+        markBarrelExchangeSynced(x.id);
+        pushed++;
+        onProgress?.(`换桶单 ${x.no || x.customer} 已同步`);
+      } else {
+        failed++;
+        onProgress?.(`换桶单 ${x.no || x.customer} 同步失败（${res.json?.msg || res.status}），稍后重试`);
+      }
+    } catch (e: any) {
+      failed++;
+      onProgress?.(`换桶单 ${x.no || x.customer} 异常：${e?.message || '失败'}`);
     }
   }
 

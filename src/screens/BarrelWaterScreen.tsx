@@ -9,18 +9,19 @@ import { SyncBadge, resolveSyncPhase } from '../components/SyncUI';
 import type { SyncState } from '../nav';
 import { toLocalDateStr, formatChineseDate } from '../utils/dateLabel';
 import {
-  getAllBarrelTypes, insertBarrelPress, insertBarrelRefund,
+  getAllBarrelTypes, insertBarrelPress, insertBarrelRefund, insertBarrelExchange,
   getDepositFlows, getAllBarrelStock, updateBarrelStockInStore,
   getBarrelSummary, searchBarrelPress, deleteBarrelPress, clearTestBarrelRecords,
-  type BarrelType, type BarrelPress, type BarrelRefund, type BarrelStockRow, type DepositFlowRow,
+  type BarrelType, type BarrelPress, type BarrelRefund, type BarrelExchange, type BarrelExchangeItem, type BarrelStockRow, type DepositFlowRow,
 } from '../db/localDb';
 
 interface Props { sync: SyncState; cacheVersion: number; onSyncAll?: () => void; }
-type ViewKey = 'main' | 'press' | 'refund' | 'flow' | 'stock';
+type ViewKey = 'main' | 'press' | 'refund' | 'exchange' | 'flow' | 'stock';
 
 const VIEW_TITLES: Record<Exclude<ViewKey, 'main'>, string> = {
   press: '压桶登记',
   refund: '退桶登记',
+  exchange: '换桶登记',
   flow: '押金流水',
   stock: '桶库存',
 };
@@ -91,6 +92,8 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
             onPress={() => setView('press')} />
           <ActionRow label="退桶登记" note="退桶、退押金、扣损耗"
             onPress={() => setView('refund')} />
+          <ActionRow label="换桶登记" note="原桶退、新桶押、结算差价"
+            onPress={() => setView('exchange')} />
           <ActionRow label="押金流水" note="按时间倒序汇总"
             onPress={() => setView('flow')} />
           <ActionRow label="桶库存" note="按桶类型在库 / 在押"
@@ -135,6 +138,7 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
       <View style={{ marginTop: theme.spaceScale[3] }}>
         {view === 'press' && <PressForm onSaved={savedToFlow} lanOn={sync.lanOn} onSyncAll={onSyncAll} />}
         {view === 'refund' && <RefundForm onSaved={savedToFlow} lanOn={sync.lanOn} onSyncAll={onSyncAll} />}
+        {view === 'exchange' && <ExchangeForm onSaved={savedToFlow} lanOn={sync.lanOn} onSyncAll={onSyncAll} />}
         {view === 'flow' && <FlowList tick={tick} />}
         {view === 'stock' && <StockList tick={tick} onChanged={refresh} />}
       </View>
@@ -386,6 +390,130 @@ function RefundForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn:
   );
 }
 
+// ============ 换桶表单 ============
+// 换桶 = 原桶退 + 新桶押，按桶类型押金单价自动结算净差价（diff）。
+// 对齐 PC 端 ExchangeBarrel.tsx（retail-admin/src/pages/BarrelWater/ExchangeBarrel.tsx）。
+function ExchangeForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn: boolean; onSyncAll?: () => void; }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
+  const types = useMemo(() => getAllBarrelTypes(), []);
+  const [customer, setCustomer] = useState('');
+  const [phone, setPhone] = useState('');
+  const [date, setDate] = useState(todayStr());
+  const [oldRows, setOldRows] = useState<BarrelExchangeItem[]>([{ barrel: '', count: 1 }]);
+  const [newRows, setNewRows] = useState<BarrelExchangeItem[]>([{ barrel: '', count: 1 }]);
+  const [note, setNote] = useState('');
+
+  // 押金单价回查：PC 端按桶类型 deposit 计算差价；手机端同款口径。
+  const depositOf = (name: string) => types.find((t) => t.name === name)?.deposit ?? 0;
+  const oldDeposit = oldRows.reduce((s, r) => s + (r.count > 0 ? r.count : 0) * depositOf(r.barrel), 0);
+  const newDeposit = newRows.reduce((s, r) => s + (r.count > 0 ? r.count : 0) * depositOf(r.barrel), 0);
+  const diff = newDeposit - oldDeposit; // >0 顾客补差，<0 退给顾客
+
+  const patchOld = (idx: number, patch: Partial<BarrelExchangeItem>) =>
+    setOldRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  const patchNew = (idx: number, patch: Partial<BarrelExchangeItem>) =>
+    setNewRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  const addOld = () => setOldRows((prev) => [...prev, { barrel: types[0]?.name ?? '', count: 1 }]);
+  const addNew = () => setNewRows((prev) => [...prev, { barrel: types[0]?.name ?? '', count: 1 }]);
+  const delOld = (idx: number) => setOldRows((prev) => prev.filter((_, i) => i !== idx));
+  const delNew = (idx: number) => setNewRows((prev) => prev.filter((_, i) => i !== idx));
+
+  const submit = () => {
+    if (!customer.trim()) return Alert.alert('换桶登记', '请填写客户姓名');
+    if (!oldRows.length || oldRows.some((r) => !r.barrel || !(r.count > 0))) return Alert.alert('换桶登记', '请填写原桶明细');
+    if (!newRows.length || newRows.some((r) => !r.barrel || !(r.count > 0))) return Alert.alert('换桶登记', '请填写新桶明细');
+    try {
+      const now = Date.now();
+      insertBarrelExchange({
+        id: uuid(), no: genNo('HT', date),
+        customer: customer.trim(), phone: phone.trim(), date,
+        oldItems: oldRows, newItems: newRows,
+        oldDepositTotal: oldDeposit, newDepositTotal: newDeposit, diff,
+        note: note.trim(), createdAt: now,
+      });
+      const syncTip = lanOn ? '已自动触发同步…' : '请连接店铺 WiFi 并触发同步，电脑端即可看到。';
+      Alert.alert('换桶登记',
+        `已登记换桶：原桶押金 ¥${oldDeposit.toFixed(2)}，新桶押金 ¥${newDeposit.toFixed(2)}，` +
+        `${diff >= 0 ? '顾客补差价' : '退给顾客'} ¥${Math.abs(diff).toFixed(2)}\n\n${syncTip}`);
+      onSaved();
+      if (lanOn) onSyncAll?.();
+    } catch (e: any) {
+      Alert.alert('换桶登记失败', e?.message || String(e));
+    }
+  };
+
+  const renderRows = (
+    rows: BarrelExchangeItem[],
+    onPatch: (idx: number, patch: Partial<BarrelExchangeItem>) => void,
+    onDel: (idx: number) => void,
+    onAdd: () => void,
+  ) => (
+    <View>
+      {rows.map((r, idx) => (
+        <View key={idx} style={{ marginTop: 8 }}>
+          <View style={styles.dualRow}>
+            <View style={{ flex: 1 }}>
+              <TypePicker types={types} value={r.barrel} onChange={(n) => onPatch(idx, { barrel: n })} />
+            </View>
+            <View style={{ width: 12 }} />
+            <View style={{ flex: 1 }}>
+              <TextInput style={styles.input} value={r.count ? String(r.count) : ''}
+                onChangeText={(v) => onPatch(idx, { count: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                placeholder="0" placeholderTextColor={theme.color.textAppTertiary} keyboardType="numeric" />
+            </View>
+            <TouchableOpacity style={{ paddingHorizontal: 8, justifyContent: 'center' }} onPress={() => onDel(idx)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={{ color: theme.color.danger, fontSize: 14 }}>删除</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ))}
+      <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: theme.color.surfaceRaised, marginTop: 10 }]} onPress={onAdd}>
+        <Text style={[styles.primaryBtnText, { color: theme.color.primaryVivid }]}>增加一行</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  return (
+    <View style={styles.card}>
+      <FieldLabel>客户姓名 *</FieldLabel>
+      <TextInput style={styles.input} value={customer} onChangeText={setCustomer} placeholder="如：张师傅" placeholderTextColor={theme.color.textAppTertiary} />
+
+      <FieldLabel>联系电话</FieldLabel>
+      <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} keyboardType="phone-pad" />
+
+      <FieldLabel>换桶日期</FieldLabel>
+      <DatePickerField value={date} onChange={setDate} />
+
+      <FieldLabel>原桶（退） *</FieldLabel>
+      {renderRows(oldRows, patchOld, delOld, addOld)}
+
+      <FieldLabel>新桶（押） *</FieldLabel>
+      {renderRows(newRows, patchNew, delNew, addNew)}
+
+      <View style={styles.readonly}>
+        <Text style={styles.readonlyText}>原桶押金合计 ¥ {oldDeposit.toFixed(2)}</Text>
+      </View>
+      <View style={[styles.readonly, { marginTop: 8 }]}>
+        <Text style={styles.readonlyText}>新桶押金合计 ¥ {newDeposit.toFixed(2)}</Text>
+      </View>
+      <View style={[styles.readonly, { marginTop: 8 }]}>
+        <Text style={[styles.readonlyText, { color: diff >= 0 ? theme.color.danger : theme.color.success }]}>
+          {diff >= 0 ? '顾客需补差价' : '退给顾客'} ¥ {Math.abs(diff).toFixed(2)}
+        </Text>
+      </View>
+
+      <FieldLabel>备注</FieldLabel>
+      <TextInput style={styles.input} value={note} onChangeText={setNote} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+
+      <TouchableOpacity style={styles.primaryBtn} onPress={submit}>
+        <Text style={styles.primaryBtnText}>保存换桶</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 // ============ 押金流水 ============
 function FlowList({ tick }: { tick: number }) {
   const { theme } = useTheme();
@@ -398,9 +526,13 @@ function FlowList({ tick }: { tick: number }) {
     <View style={styles.card}>
       {flows.map((f, i) => (
         <View key={f.key} style={[styles.flowRow, i > 0 && { borderTopWidth: 1, borderTopColor: theme.color.dividerApp }]}>
-          <View style={[styles.flowTag, { backgroundColor: f.type === 'press' ? theme.color.primarySoft : theme.color.surfaceRaised }]}>
-            <Text style={[styles.flowTagText, { color: f.type === 'press' ? theme.color.primaryVivid : theme.color.info }]}>
-              {f.type === 'press' ? '压桶' : '退桶'}
+          <View style={[styles.flowTag, {
+            backgroundColor: f.type === 'press' ? theme.color.primarySoft : f.type === 'refund' ? theme.color.surfaceRaised : theme.color.surfaceRaised,
+          }]}>
+            <Text style={[styles.flowTagText, {
+              color: f.type === 'press' ? theme.color.primaryVivid : f.type === 'refund' ? theme.color.info : theme.color.warning,
+            }]}>
+              {f.type === 'press' ? '压桶' : f.type === 'refund' ? '退桶' : '换桶'}
             </Text>
           </View>
           <View style={{ flex: 1 }}>

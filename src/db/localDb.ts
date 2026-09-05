@@ -684,7 +684,7 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
   // 再重新拉 PC 全量；本地 synced=0 的草稿保留不动。
   try {
     ensureBarrelTables();
-    db.execSync('BEGIN; DELETE FROM barrel_press WHERE synced=1; DELETE FROM barrel_refund WHERE synced=1; COMMIT;');
+    db.execSync('BEGIN; DELETE FROM barrel_press WHERE synced=1; DELETE FROM barrel_refund WHERE synced=1; DELETE FROM barrel_exchange WHERE synced=1; COMMIT;');
   } catch (e: any) {
     console.warn('[localDb] clear synced barrel records failed:', e?.message || e);
   }
@@ -717,6 +717,19 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
     }
   } catch (e: any) {
     console.warn('[localDb] fetch barrel refund failed:', e?.message || e);
+  }
+  try {
+    console.log('[localDb] fetching barrel exchange from', `${baseUrl}/api/barrel/exchange`);
+    const eRes = await apiFetch(`${baseUrl}/api/barrel/exchange`, { method: 'GET' });
+    if (eRes.ok && Array.isArray(eRes.json?.data)) {
+      const added = mergeBarrelExchangeFromRemote(eRes.json.data);
+      barrelSynced += added;
+      console.log('[localDb] barrel exchange merged:', added);
+    } else if (eRes.ok) {
+      console.warn('[localDb] barrel exchange response is 200 but not a valid {data:[]} payload. Wrong port?');
+    }
+  } catch (e: any) {
+    console.warn('[localDb] fetch barrel exchange failed:', e?.message || e);
   }
 
   // 桶类型：PC 有则按 name 覆盖/补充到本地（UPSERT），让 PC 真实押金金额生效。
@@ -1016,6 +1029,27 @@ export interface BarrelRefund {
   createdAt: number;
 }
 
+// 换桶登记：顾客以原桶退、新桶押，按桶类型押金单价结算净差价。
+// 结构对齐 PC 端 /api/barrel/exchange（retail-admin/src/pages/BarrelWater/ExchangeBarrel.tsx）。
+export interface BarrelExchangeItem {
+  barrel: string; // 桶类型名
+  count: number;
+}
+export interface BarrelExchange {
+  id: string; // uuid
+  no: string; // HT+日期+3位序号
+  customer: string;
+  phone: string;
+  date: string; // YYYY-MM-DD
+  oldItems: BarrelExchangeItem[]; // 原桶明细（退）
+  newItems: BarrelExchangeItem[]; // 新桶明细（押）
+  oldDepositTotal: number; // 原桶押金合计
+  newDepositTotal: number; // 新桶押金合计
+  diff: number; // 净差价 = newDepositTotal - oldDepositTotal（>0 顾客补差，<0 退顾客）
+  note: string;
+  createdAt: number;
+}
+
 export interface BarrelStockRow {
   type: string;       // 桶类型名（PK）
   inStore: number;    // 在库（用户维护）
@@ -1057,6 +1091,14 @@ function ensureBarrelTables() {
     inUse INTEGER DEFAULT 0,
     updatedAt INTEGER
   );`);
+  db.execSync(`CREATE TABLE IF NOT EXISTS barrel_exchange (
+    id TEXT PRIMARY KEY,
+    no TEXT, customer TEXT, phone TEXT, date TEXT,
+    oldItems TEXT, newItems TEXT,
+    oldDepositTotal REAL, newDepositTotal REAL, diff REAL,
+    note TEXT, createdAt INTEGER,
+    synced INTEGER DEFAULT 0
+  );`);
   // 种子：3 个常见 18L 桶类型（对齐 PC STOCK_TYPES）
   const row = db.getFirstSync('SELECT COUNT(*) AS c FROM barrel_types') as { c: number };
   if (row.c === 0) {
@@ -1070,9 +1112,10 @@ function ensureBarrelTables() {
         [s.name, s.material, s.deposit, 'active']);
     });
   }
-  // 升级补列：旧库 barrel_press / barrel_refund 可能没有 synced 列（双向同步所需）
+  // 升级补列：旧库 barrel_press / barrel_refund / barrel_exchange 可能没有 synced 列（双向同步所需）
   try { db.execSync('ALTER TABLE barrel_press ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
   try { db.execSync('ALTER TABLE barrel_refund ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
+  try { db.execSync('ALTER TABLE barrel_exchange ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
 }
 
 function safeParsePressItems(raw: string): BarrelPressItem[] {
@@ -1153,6 +1196,124 @@ export function getAllBarrelRefund(): BarrelRefund[] {
   ensureBarrelTables();
   const rows = getDb().getAllSync('SELECT * FROM barrel_refund ORDER BY createdAt DESC') as Array<Omit<BarrelRefund, 'items'> & { items: string }>;
   return rows.map((r) => ({ ...r, items: safeParseRefundItems(r.items) }));
+}
+
+// ============ 换桶登记 CRUD ============
+// 换桶是压桶 + 退桶的复合登记（原桶退、新桶押），不单独维护在押库存：
+// 下行 recalc 已按 barrel_press / barrel_refund 重算 inUse；手机端换桶仅作为押金流水的一条记录，
+// 不重复扣减库存（与 PC 端一致：PC 在事务内退原桶+押新桶，库存净变化已由 press/refund 体现）。
+function safeParseExchangeItems(raw: string): BarrelExchangeItem[] {
+  try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; }
+}
+
+export function insertBarrelExchange(x: BarrelExchange, synced = 0) {
+  ensureBarrelTables();
+  const db = getDb();
+  db.runSync(
+    `INSERT OR REPLACE INTO barrel_exchange
+     (id,no,customer,phone,date,oldItems,newItems,oldDepositTotal,newDepositTotal,diff,note,createdAt,synced)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [x.id, x.no, x.customer, x.phone, x.date, JSON.stringify(x.oldItems),
+     JSON.stringify(x.newItems), x.oldDepositTotal, x.newDepositTotal, x.diff, x.note, x.createdAt, synced]
+  );
+}
+
+export function getAllBarrelExchange(): BarrelExchange[] {
+  ensureBarrelTables();
+  const rows = getDb().getAllSync('SELECT * FROM barrel_exchange ORDER BY createdAt DESC') as Array<Omit<BarrelExchange, 'oldItems' | 'newItems'> & { oldItems: string; newItems: string }>;
+  return rows.map((r) => ({
+    ...r,
+    oldItems: safeParseExchangeItems(r.oldItems),
+    newItems: safeParseExchangeItems(r.newItems),
+  }));
+}
+
+export function searchBarrelExchange(kw: string): BarrelExchange[] {
+  ensureBarrelTables();
+  const trimmed = kw.trim();
+  if (!trimmed) return getAllBarrelExchange();
+  const like = `%${trimmed}%`;
+  const rows = getDb().getAllSync(
+    `SELECT * FROM barrel_exchange
+     WHERE no LIKE ? OR customer LIKE ? OR phone LIKE ?
+     ORDER BY createdAt DESC`,
+    [like, like, like]
+  ) as Array<Omit<BarrelExchange, 'oldItems' | 'newItems'> & { oldItems: string; newItems: string }>;
+  return rows.map((r) => ({
+    ...r,
+    oldItems: safeParseExchangeItems(r.oldItems),
+    newItems: safeParseExchangeItems(r.newItems),
+  }));
+}
+
+export function deleteBarrelExchange(id: string) {
+  ensureBarrelTables();
+  getDb().runSync('DELETE FROM barrel_exchange WHERE id=?', [id]);
+}
+
+export function getUnsyncedBarrelExchange(): BarrelExchange[] {
+  ensureBarrelTables();
+  const rows = getDb().getAllSync('SELECT * FROM barrel_exchange WHERE synced=0 OR synced IS NULL ORDER BY createdAt ASC') as Array<Omit<BarrelExchange, 'oldItems' | 'newItems'> & { oldItems: string; newItems: string }>;
+  return rows.map((r) => ({
+    ...r,
+    oldItems: safeParseExchangeItems(r.oldItems),
+    newItems: safeParseExchangeItems(r.newItems),
+  }));
+}
+
+export function getUnsyncedBarrelExchangeCount(): number {
+  ensureBarrelTables();
+  const row = getDb().getFirstSync('SELECT COUNT(*) AS c FROM barrel_exchange WHERE synced=0 OR synced IS NULL') as { c: number } | undefined;
+  return row?.c ?? 0;
+}
+
+export function markBarrelExchangeSynced(id: string) {
+  ensureBarrelTables();
+  getDb().runSync('UPDATE barrel_exchange SET synced=1 WHERE id=?', [id]);
+}
+
+// 下行：把 PC 的换桶记录按服务端 id 合并进本地，与 press/refund 同款去重逻辑。
+function remoteExchangeToLocal(pc: any): BarrelExchange {
+  return {
+    id: `pc-${pc.id}`,
+    no: pc.no || '',
+    customer: pc.customer || '',
+    phone: pc.phone || '',
+    date: pc.date,
+    oldItems: (Array.isArray(pc.oldItems) ? pc.oldItems : []).map((i: any) => ({ barrel: i.barrel, count: Number(i.count) || 0 })),
+    newItems: (Array.isArray(pc.newItems) ? pc.newItems : []).map((i: any) => ({ barrel: i.barrel, count: Number(i.count) || 0 })),
+    oldDepositTotal: Number(pc.oldDepositTotal) || 0,
+    newDepositTotal: Number(pc.newDepositTotal) || 0,
+    diff: Number(pc.diff) || 0,
+    note: '',
+    createdAt: pc.createdAt ? new Date(pc.createdAt).getTime() : Date.now(),
+  };
+}
+export function mergeBarrelExchangeFromRemote(list: any[]): number {
+  ensureBarrelTables();
+  let added = 0;
+  let replaced = 0;
+  let skippedDraft = 0;
+  let skippedEmpty = 0;
+  for (const pc of list || []) {
+    if (!pc || !pc.id) { skippedEmpty++; continue; }
+    if (pc.no) {
+      const localDraft = getDb().getFirstSync(
+        'SELECT 1 FROM barrel_exchange WHERE no=? AND (synced=0 OR synced IS NULL)',
+        [pc.no]
+      );
+      if (localDraft) { skippedDraft++; continue; }
+    }
+    const localId = `pc-${pc.id}`;
+    const exist = getDb().getFirstSync('SELECT 1 FROM barrel_exchange WHERE id=?', [localId]);
+    insertBarrelExchange(remoteExchangeToLocal(pc), 1);
+    if (exist) replaced++; else added++;
+  }
+  console.log('[localDb] mergeBarrelExchangeFromRemote stats: input=', list?.length, 'added=', added, 'replaced=', replaced, 'skippedDraft=', skippedDraft, 'skippedEmptyId=', skippedEmpty);
+  if (added > 0 || replaced > 0) {
+    try { recalcBarrelStockInUse(); } catch (e) { console.warn('[localDb] recalc after merge exchange failed:', e); }
+  }
+  return added;
 }
 
 // ============ 桶装水双向同步辅助 ============
@@ -1384,9 +1545,9 @@ export interface DepositFlowRow {
   no: string;
   date: string;
   createdAt: number;
-  type: 'press' | 'refund';
+  type: 'press' | 'refund' | 'exchange';
   customer: string;
-  amount: number; // 压桶正 / 退桶负
+  amount: number; // 压桶正 / 退桶负 / 换桶净差价（正=顾客补，负=退顾客）
   remark: string;
 }
 
@@ -1394,6 +1555,7 @@ export function getDepositFlows(): DepositFlowRow[] {
   ensureBarrelTables();
   const pressList = getAllBarrelPress();
   const refundList = getAllBarrelRefund();
+  const exchangeList = getAllBarrelExchange();
   const pressRows: DepositFlowRow[] = pressList.map((p) => ({
     key: `press-${p.id}`,
     no: p.no,
@@ -1414,7 +1576,17 @@ export function getDepositFlows(): DepositFlowRow[] {
     amount: -r.refund,
     remark: `退 ${r.pressNo || '—'} 扣减 ¥${r.totalDeduct}`,
   }));
-  return [...pressRows, ...refundRows].sort((a, b) => {
+  const exchangeRows: DepositFlowRow[] = exchangeList.map((x) => ({
+    key: `exchange-${x.id}`,
+    no: x.no,
+    date: x.date,
+    createdAt: x.createdAt || 0,
+    type: 'exchange',
+    customer: x.customer,
+    amount: x.diff, // 净押金差价：>0 顾客补差，<0 退给顾客
+    remark: '换桶 原→新',
+  }));
+  return [...pressRows, ...refundRows, ...exchangeRows].sort((a, b) => {
     const tA = a.createdAt || parseTimeKey(a.date, a.no);
     const tB = b.createdAt || parseTimeKey(b.date, b.no);
     // 时间大的排前面（最新记录在最上）；时间相同按单号降序兜底
