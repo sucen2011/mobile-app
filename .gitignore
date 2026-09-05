@@ -48,3 +48,9 @@ app.json.backup
 eas_build4.log
 fetch_eas_log.js
 start_expo_dev.bat
+
+# stale SDK54 node_modules backup (left over from SDK57 upgrade) - never commit/scan
+node_modules_sdk54_old/
+
+# EAS export test artifacts - never commit
+export-test-sdk57/

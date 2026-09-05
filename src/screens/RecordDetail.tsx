@@ -986,7 +986,7 @@ function makeStyles(theme: any) {
   thumbHint: { fontSize: theme.font.sizeV4.micro, color: theme.color.primaryVivid, marginTop: 2 },
   thumbSpinner: { marginTop: 4 },
   thumbOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.35)',
     alignItems: 'center',
     justifyContent: 'center',

@@ -1,8 +1,9 @@
 {
   "expo": {
-    "name": "\u5546\u8d85\u53f0\u8d26",
+    "name": "商超台账",
     "slug": "mobile-app",
-    "version": "1.0.6",
+    "owner": "sucen2011s-team",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -18,7 +19,7 @@
     },
     "android": {
       "package": "com.retail.ledger",
-      "versionCode": 7,
+      "versionCode": 9,
       "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -53,13 +54,13 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-status-bar"
     ],
     "extra": {
       "eas": {
         "projectId": "0f897bd4-97c3-4e85-9d67-abede6408f54"
       }
-    },
-    "owner": "sucen2011s-team"
+    }
   }
 }

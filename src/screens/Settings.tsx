@@ -10,6 +10,8 @@ import SystemSettings from './SystemSettings';
 import AccountManagement from './AccountManagement';
 import OcrImageScreen from './OcrImageScreen';
 import SupplierExpenseScreen from './SupplierExpenseScreen';
+import TobaccoProfitScreen from './TobaccoProfitScreen';
+import TobaccoTrackingScreen from './TobaccoTrackingScreen';
 import type { SyncState } from '../nav';
 
 interface Props {
@@ -29,7 +31,7 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
   const syncedMin = lastSync ? Math.max(0, Math.round((Date.now() - lastSync) / 60000)) : null;
   const phase = resolveSyncPhase(sync);
   const [tok, setTok] = useState('');
-  const [view, setView] = useState<'main' | 'account' | 'ocr' | 'system' | 'warranty' | 'supplierExpense'>('main');
+  const [view, setView] = useState<'main' | 'account' | 'ocr' | 'system' | 'warranty' | 'supplierExpense' | 'tobaccoProfit' | 'tobaccoTracking'>('main');
   useEffect(() => { getApiToken().then((t) => setTok(t || '')); }, []);
 
   const SUB_TITLES: Record<string, string> = {
@@ -37,15 +39,24 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
     ocr: 'OCR主图生成',
     system: '系统设置',
     warranty: '电器保修',
+    tobaccoProfit: '烟草利润',
+    tobaccoTracking: '到货跟踪',
   };
 
-  // 「我的」子页面：账号管理 / OCR / 系统设置 / 电器保修。
+  // 「我的」子页面：账号管理 / OCR / 系统设置 / 电器保修 / 烟草利润 / 到货跟踪。
   // 系统设置（SystemSettings，含主题切换+持久化）、电器保修（WarrantyScreen：本地 SQLite）、
   // 账号管理（AccountManagement：本机操作员档案）、OCR 主图生成（OcrImageScreen：相机拍照→后端腾讯云 OCR→主图库）均已落地。
   if (view !== 'main') {
     // 陈列费用：独立页（自带头部与「‹ 我的」返回），直接占满，不走 Settings 的子页 ScrollView 框架
     if (view === 'supplierExpense') {
       return <SupplierExpenseScreen baseUrl={baseUrl} onBack={() => setView('main')} />;
+    }
+    // 烟草查詢页：自带头部与返回，直接占满（只读查询 PC 端 3001 后端的烟草利润/到货数据）
+    if (view === 'tobaccoProfit') {
+      return <TobaccoProfitScreen baseUrl={baseUrl} onBack={() => setView('main')} />;
+    }
+    if (view === 'tobaccoTracking') {
+      return <TobaccoTrackingScreen baseUrl={baseUrl} onBack={() => setView('main')} />;
     }
     return (
       <ScrollView style={styles.subRoot} contentContainerStyle={styles.subContent}>
@@ -174,6 +185,8 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
         <MenuRow label="OCR主图生成" onPress={() => setView('ocr')} />
         <MenuRow label="系统设置" onPress={() => setView('system')} />
         <MenuRow label="陈列费用" onPress={() => setView('supplierExpense')} />
+        <MenuRow label="烟草利润" onPress={() => setView('tobaccoProfit')} />
+        <MenuRow label="到货跟踪" onPress={() => setView('tobaccoTracking')} />
         <MenuRow label="电器保修" onPress={() => setView('warranty')} last />
       </View>
 

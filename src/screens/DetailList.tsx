@@ -656,7 +656,7 @@ const styles = StyleSheet.create({
   thumbText: { fontSize: theme.font.size.sm, color: theme.color.textMuted },
   thumbHint: { fontSize: theme.font.size.xs, color: theme.color.primary, marginTop: 2 },
   thumbOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.35)',
     alignItems: 'center', justifyContent: 'center',
     borderRadius: theme.radius.md,
