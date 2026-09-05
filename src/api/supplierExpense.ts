@@ -2,8 +2,13 @@ import { apiFetch, twoStepDelete } from './client';
 import { uploadImage } from './upload';
 
 // ============ 供应商陈列费用管理：移动端 API 封装 ============
-// 费用类型：1=钱 2=货物；结算方式：1=年结 2=月结 3=按次 4=返货（供应商周期返货抵费）
-// 返货周期 rebateCycle：1=每月 2=每年 3=每季度；rebateTotalPeriods=0 表示不限期数
+// 新模型（与 PC retail-admin 对齐）：
+//   费用类型 ExpenseType：1=返钱 2=返货（原旧模型 1=钱/2=货物 已废弃）
+//   结算方式 SettleMethod：1=年结 2=月结 3=按次 5=季度结 6=自定义（已移除 4=返货，返货改为 expenseType=2）
+//   返货(expenseType=2)：关联商品档案、无单价、不折算金额；settleMethod 提交时强制为 3
+//     settledAmount 复用为「已返期数」；rebateTotalPeriods=0 表示不限期数长期有效
+//   返钱(expenseType=1)：按 settleMethod + 到期日 + 费用金额(totalAmount) 结算
+// 返货周期 rebateCycle：1=每月 2=每年 3=每季度
 // 支付方式（payment）：1=转账 2=现金 3=冲抵货款 4=其他
 // 状态：0=待结算 1=部分结算 2=已结清
 //
@@ -34,11 +39,16 @@ function buildQuery(params?: Record<string, any>): string {
   return s ? `?${s}` : '';
 }
 
-export type ExpenseType = 1 | 2;
-export type SettleMethod = 1 | 2 | 3 | 4 | 5;
-export type RebateCycle = 1 | 2 | 3;
-export type PaymentMethod = 1 | 2 | 3 | 4;
+export type ExpenseType = 1 | 2;               // 1=返钱 2=返货
+export type SettleMethod = 1 | 2 | 3 | 5 | 6;  // 1=年结 2=月结 3=按次 5=季度结 6=自定义（已移除 4）
+export type RebateCycle = 1 | 2 | 3;           // 1=每月 2=每年 3=每季度
+export type PaymentMethod = 1 | 2 | 3 | 4;     // 1=转账 2=现金 3=冲抵货款 4=其他
 export type ExpenseStatus = 0 | 1 | 2;
+
+export const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '返钱', 2: '返货' };
+export const SETTLE_METHOD_LABEL: Record<SettleMethod, string> = { 1: '年结', 2: '月结', 3: '按次', 5: '季度结', 6: '自定义' };
+export const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度' };
+export const PAYMENT_LABEL: Record<PaymentMethod, string> = { 1: '转账', 2: '现金', 3: '冲抵货款', 4: '其他' };
 
 export interface SupplierExpense {
   id: number;
@@ -57,20 +67,15 @@ export interface SupplierExpense {
   overdue: boolean;
   remark: string;
   hasImages: boolean;
-  goodsName: string;
-  goodsSpec: string;
-  goodsQty: number;
-  goodsUnit: string;
-  goodsUnitPrice: number;
-  // 返货（settleMethod=4）
+  // 返货（expenseType=2）：关联商品档案、无单价、不折算金额
+  productId: number;
+  productName: string;
   rebateCycle: RebateCycle;
-  rebateGoodsName: string;
-  rebateGoodsSpec: string;
   rebateQty: number;
   rebateUnit: string;
-  rebateUnitPrice: number;
   rebateStartDate: string;
   nextRebateDate: string;
+  maturityDate: string;
   rebateTotalPeriods: number;
   createdAt: string;
 }
@@ -124,8 +129,7 @@ export interface ExpenseQuery {
 
 /**
  * 图片提交形态：{ imageUrl, imageId }。
- * 注意后端 POST /api/supplier-expenses 读的是 im.imageUrl（不是 PC 端用的 im.url），
- * 这里用 imageUrl 规避 PC 端「只存 imageId、url 为空」的字段名 bug。
+ * 后端 POST /api/supplier-expenses 读的是 im.imageUrl。
  */
 export interface ExpenseImageDraft {
   imageUrl: string;
@@ -136,25 +140,20 @@ export type ExpensePayload = {
   supplierId?: string;
   supplierName: string;
   expenseType: ExpenseType;
-  item: string;
-  settleMethod: SettleMethod;
+  item?: string;
+  settleMethod?: SettleMethod;
   expenseDate: string;
   dueDate?: string;
   totalAmount?: number;
   remark?: string;
-  goodsName?: string;
-  goodsSpec?: string;
-  goodsQty?: number;
-  goodsUnit?: string;
-  goodsUnitPrice?: number;
-  // 返货（settleMethod=4）
+  // 返货（expenseType=2）：关联商品档案、无单价、不折算金额
+  productId?: number;
+  productName?: string;
   rebateCycle?: RebateCycle;
-  rebateGoodsName?: string;
-  rebateGoodsSpec?: string;
   rebateQty?: number;
   rebateUnit?: string;
-  rebateUnitPrice?: number;
   rebateStartDate?: string;
+  maturityDate?: string;
   rebateTotalPeriods?: number;
   images?: ExpenseImageDraft[];
 };

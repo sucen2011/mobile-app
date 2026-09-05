@@ -9,6 +9,7 @@ import { SafeAreaHeader } from '../components/SafeArea';
 import {
   fetchExpenses, getExpenseDetail, fetchExpenseSummary, createExpense, updateExpense, settleExpense,
   deleteExpense, reverseExpense, uploadExpenseImage,
+  EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
   type ExpenseType, type SettleMethod, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
 } from '../api/supplierExpense';
@@ -33,20 +34,11 @@ function todayStr(): string {
 function money(n: number): string {
   return `¥${Number(n || 0).toFixed(2)}`;
 }
-
-const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '钱', 2: '货物' };
-const SETTLE_METHOD_LABEL: Record<SettleMethod, string> = { 1: '年结', 2: '月结', 3: '按次', 4: '返货', 5: '季度结' };
-const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度' };
-const PAYMENT_LABEL: Record<PaymentMethod, string> = { 1: '转账', 2: '现金', 3: '冲抵货款', 4: '其他' };
+function round(n: number): number {
+  return Math.round(Number(n) || 0);
+}
 function statusLabel(s: ExpenseStatus): string {
   return s === 2 ? '已结清' : s === 1 ? '部分结算' : '待结算';
-}
-function rebatePeriodLabel(dateStr: string, cycle: number): string {
-  if (!dateStr) return '';
-  return Number(cycle) === 2 ? String(dateStr).slice(0, 4) : String(dateStr).slice(0, 7);
-}
-function periodAmount(e: SupplierExpense): number {
-  return Math.round((Number(e.rebateQty) || 0) * (Number(e.rebateUnitPrice) || 0) * 100) / 100;
 }
 function toAbsoluteUrl(baseUrl: string, url: string): string {
   if (!url) return '';
@@ -127,7 +119,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const showItemActions = (e: SupplierExpense) => {
     Alert.alert(
       `${e.expenseNo}`,
-      `${e.supplierName} · ${money(e.totalAmount)}`,
+      `${e.supplierName} · ${e.expenseType === 2 ? `每期 ${e.rebateQty}${e.rebateUnit || '件'}` : money(e.totalAmount)}`,
       [
         { text: '编辑', onPress: () => startEdit(e) },
         { text: '删除', style: 'destructive', onPress: () => confirmDelete(e) },
@@ -192,7 +184,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               placeholderTextColor={theme.color.textAppTertiary}
             />
             <View style={styles.segRow}>
-              {([{ k: '', t: '全部' }, { k: '1', t: '钱' }, { k: '2', t: '货物' }] as { k: TypeFilter; t: string }[]).map((o) => (
+              {([{ k: '', t: '全部' }, { k: '1', t: '返钱' }, { k: '2', t: '返货' }] as { k: TypeFilter; t: string }[]).map((o) => (
                 <TouchableOpacity key={o.k} style={[styles.segBtn, typeFilter === o.k && styles.segBtnActive]} onPress={() => setTypeFilter(o.k)}>
                   <Text style={[styles.segBtnText, typeFilter === o.k && styles.segBtnTextActive]}>{o.t}</Text>
                 </TouchableOpacity>
@@ -211,45 +203,48 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               <Text style={styles.emptySub}>点右上角「＋ 登记」新增一笔</Text>
             </View>
           ) : (
-            list.map((e, i) => (
-              <View key={e.id} style={[styles.itemCard, i > 0 && { marginTop: theme.spaceScale[3] }]}>
-                <TouchableOpacity style={styles.itemMain} onPress={() => openDetail(e.id)} activeOpacity={0.7}>
-                  <View style={styles.itemTop}>
-                    <Text style={styles.itemNo}>{e.expenseNo}</Text>
-                    <TypeTag type={e.expenseType} />
-                  </View>
-                  <Text style={styles.itemSupplier}>{e.supplierName}</Text>
-                  <Text style={styles.itemItem}>{e.item || (e.expenseType === 2 ? e.goodsName : '—')}</Text>
-                  <View style={styles.itemAmountRow}>
-                    {e.settleMethod === 4 ? (
-                      <Text style={styles.itemAmount}>每期 {money(periodAmount(e))}</Text>
-                    ) : (
-                      <Text style={styles.itemAmount}>{money(e.totalAmount)}</Text>
-                    )}
-                    {e.settleMethod === 4 ? (
-                      e.status === 2 ? <Text style={styles.itemUnsettled}>已全部返完</Text>
-                        : <Text style={styles.itemUnsettled}>下次返货 {e.nextRebateDate || '—'}</Text>
-                    ) : (
-                      <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
-                    )}
-                  </View>
-                  <View style={styles.itemFoot}>
-                    <StatusTag status={e.status} />
-                    {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
-                  </View>
-                </TouchableOpacity>
-                <View style={styles.itemActions}>
-                  {e.status < 2 ? (
-                    <TouchableOpacity style={styles.settlePill} onPress={() => setSettleTarget(e)}>
-                      <Text style={styles.settlePillText}>{e.settleMethod === 4 ? '确认收货' : '结算'}</Text>
-                    </TouchableOpacity>
-                  ) : null}
-                  <TouchableOpacity style={styles.morePill} onPress={() => showItemActions(e)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={styles.morePillText}>⋮</Text>
+            list.map((e, i) => {
+              const isRebate = e.expenseType === 2;
+              return (
+                <View key={e.id} style={[styles.itemCard, i > 0 && { marginTop: theme.spaceScale[3] }]}>
+                  <TouchableOpacity style={styles.itemMain} onPress={() => openDetail(e.id)} activeOpacity={0.7}>
+                    <View style={styles.itemTop}>
+                      <Text style={styles.itemNo}>{e.expenseNo}</Text>
+                      <TypeTag type={e.expenseType} />
+                    </View>
+                    <Text style={styles.itemSupplier}>{e.supplierName}</Text>
+                    <Text style={styles.itemItem}>{e.item || (isRebate ? (e.productName || '—') : '—')}</Text>
+                    <View style={styles.itemAmountRow}>
+                      {isRebate ? (
+                        <>
+                          <Text style={styles.itemAmount}>{`每期 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
+                          <Text style={styles.itemUnsettled}>{`已返 ${round(e.settledAmount)} 期`}</Text>
+                        </>
+                      ) : (
+                        <>
+                          <Text style={styles.itemAmount}>{money(e.totalAmount)}</Text>
+                          <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
+                        </>
+                      )}
+                    </View>
+                    <View style={styles.itemFoot}>
+                      <StatusTag status={e.status} />
+                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
+                    </View>
                   </TouchableOpacity>
+                  <View style={styles.itemActions}>
+                    {e.status < 2 ? (
+                      <TouchableOpacity style={styles.settlePill} onPress={() => setSettleTarget(e)}>
+                        <Text style={styles.settlePillText}>{isRebate ? '确认收货' : '结算'}</Text>
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity style={styles.morePill} onPress={() => showItemActions(e)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Text style={styles.morePillText}>⋮</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              </View>
-            ))
+              );
+            })
           )}
           <View style={{ height: 24 }} />
         </ScrollView>
@@ -356,10 +351,10 @@ function StatCell({ label, value, valueColor }: { label: string; value: string; 
 // ============ 类型 / 状态 Tag ============
 function TypeTag({ type }: { type: ExpenseType }) {
   const { theme } = useTheme();
-  const isGoods = type === 2;
+  const isRebate = type === 2;
   return (
-    <View style={{ backgroundColor: isGoods ? theme.color.info + '1A' : theme.color.primarySoft, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
-      <Text style={{ fontSize: 12, color: isGoods ? theme.color.info : theme.color.primaryVivid, fontWeight: theme.font.weight.medium }}>
+    <View style={{ backgroundColor: isRebate ? theme.color.info + '1A' : theme.color.primarySoft, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+      <Text style={{ fontSize: 12, color: isRebate ? theme.color.info : theme.color.primaryVivid, fontWeight: theme.font.weight.medium }}>
         {EXPENSE_TYPE_LABEL[type]}
       </Text>
     </View>
@@ -378,19 +373,28 @@ function StatusTag({ status }: { status: ExpenseStatus }) {
 // ============ 详情正文 ============
 function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete, onReverse }: any) {
   const e = detail.expense;
+  const isRebate = e.expenseType === 2;
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   return (
     <View>
-      {/* 金额三栏 */}
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>金额</Text>
-        <View style={styles.amountRow}>
-          <View style={styles.amountCol}><Text style={styles.amountLabel}>总额</Text><Text style={[styles.amountVal, { color: theme.color.textApp }]}>{money(e.totalAmount)}</Text></View>
-          <View style={styles.amountCol}><Text style={styles.amountLabel}>已结</Text><Text style={[styles.amountVal, { color: theme.color.success }]}>{money(e.settledAmount)}</Text></View>
-          <View style={styles.amountCol}><Text style={styles.amountLabel}>未结</Text><Text style={[styles.amountVal, { color: theme.color.warning }]}>{money(e.unsettledAmount)}</Text></View>
+      {/* 金额 / 期数 */}
+      {isRebate ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>返货进度</Text>
+          <InfoRow label="已返期数" value={e.rebateTotalPeriods > 0 ? `${round(e.settledAmount)} 期 / 共 ${e.rebateTotalPeriods} 期` : `${round(e.settledAmount)} 期 / 不限期数`} />
+          <InfoRow label="关联商品" value={e.productName || '—'} />
         </View>
-        {e.overdue ? <Text style={[styles.overdueLine, { color: theme.color.danger }]}>⚠ 已逾期（到期 {e.dueDate}）</Text> : null}
-      </View>
+      ) : (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>金额</Text>
+          <View style={styles.amountRow}>
+            <View style={styles.amountCol}><Text style={styles.amountLabel}>总额</Text><Text style={[styles.amountVal, { color: theme.color.textApp }]}>{money(e.totalAmount)}</Text></View>
+            <View style={styles.amountCol}><Text style={styles.amountLabel}>已结</Text><Text style={[styles.amountVal, { color: theme.color.success }]}>{money(e.settledAmount)}</Text></View>
+            <View style={styles.amountCol}><Text style={styles.amountLabel}>未结</Text><Text style={[styles.amountVal, { color: theme.color.warning }]}>{money(e.unsettledAmount)}</Text></View>
+          </View>
+          {e.overdue ? <Text style={[styles.overdueLine, { color: theme.color.danger }]}>⚠ 已逾期（到期 {e.dueDate}）</Text> : null}
+        </View>
+      )}
 
       {/* 基本信息 */}
       <View style={styles.card}>
@@ -399,32 +403,22 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete
         <InfoRow label="供应商" value={e.supplierName} />
         <InfoRow label="类型" value={EXPENSE_TYPE_LABEL[e.expenseType as ExpenseType]} />
         <InfoRow label="项目" value={e.item || '—'} />
-        <InfoRow label="结算方式" value={SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
+        <InfoRow label="结算方式" value={isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
         <InfoRow label="发生日期" value={e.expenseDate} />
-        {e.settleMethod !== 3 ? <InfoRow label="到期日" value={e.dueDate || '—'} /> : null}
+        {!isRebate && e.settleMethod !== 3 ? <InfoRow label="到期日" value={e.dueDate || '—'} /> : null}
         {e.remark ? <InfoRow label="备注" value={e.remark} /> : null}
       </View>
 
-      {/* 货物明细 */}
-      {e.expenseType === 2 ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>货物明细</Text>
-          <InfoRow label="品名" value={e.goodsName || '—'} />
-          <InfoRow label="规格" value={e.goodsSpec || '—'} />
-          <InfoRow label="数量" value={`${e.goodsQty} ${e.goodsUnit || ''}`} />
-          <InfoRow label="单价" value={money(e.goodsUnitPrice)} />
-        </View>
-      ) : null}
-
-      {/* 返货协议（settleMethod=4） */}
-      {e.settleMethod === 4 ? (
+      {/* 返货协议（expenseType=2） */}
+      {isRebate ? (
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>返货协议（{REBATE_CYCLE_LABEL[e.rebateCycle as RebateCycle] || '每月'}返）</Text>
-          <InfoRow label="返货品" value={`${e.rebateGoodsName || '—'} ${e.rebateGoodsSpec || ''}`} />
-          <InfoRow label="每期" value={`${e.rebateQty}${e.rebateUnit || ''} × ${money(e.rebateUnitPrice)}（等价 ${money(periodAmount(e))}）`} />
-          <InfoRow label="起算日" value={e.rebateStartDate || '—'} />
-          <InfoRow label="总期数" value={e.rebateTotalPeriods > 0 ? `${e.rebateTotalPeriods} 期` : '不限'} />
+          <InfoRow label="关联商品" value={e.productName || '—'} />
+          <InfoRow label="每期" value={`${round(e.rebateQty)}${e.rebateUnit || '件'}`} />
+          <InfoRow label="首期日期" value={e.rebateStartDate || '—'} />
           <InfoRow label="下次返货" value={e.nextRebateDate || '—'} />
+          <InfoRow label="到期时间" value={e.maturityDate ? e.maturityDate : '长期（不限）'} />
+          <InfoRow label="期限数" value={e.rebateTotalPeriods > 0 ? `${e.rebateTotalPeriods} 期` : '不限'} />
         </View>
       ) : null}
 
@@ -476,7 +470,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete
         <TouchableOpacity style={[styles.actionBtn, styles.actionBtnDanger]} onPress={onDelete}>
           <Text style={[styles.actionBtnText, { color: theme.color.danger }]}>删除</Text>
         </TouchableOpacity>
-        {e.status >= 1 ? (
+        {!isRebate && e.settledAmount > 0 ? (
           <TouchableOpacity style={[styles.actionBtn, styles.actionBtnWarning]} onPress={onReverse}>
             <Text style={[styles.actionBtnText, { color: theme.color.warning }]}>冲正</Text>
           </TouchableOpacity>
@@ -485,7 +479,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete
 
       {e.status < 2 ? (
         <TouchableOpacity style={styles.settleActionBtn} onPress={onSettle}>
-          <Text style={styles.settleActionText}>{e.settleMethod === 4 ? '确认收货' : '现场结算'}</Text>
+          <Text style={styles.settleActionText}>{isRebate ? '确认收货' : '现场结算'}</Text>
         </TouchableOpacity>
       ) : (
         <View style={styles.doneBanner}><Text style={styles.doneBannerText}>已结清</Text></View>
@@ -521,6 +515,9 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 // ============ 新增/编辑登记表单 ============
 function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, onSaved, onError }: any) {
   const e = editing as SupplierExpense | undefined;
+  const isRebate = (e?.expenseType ?? 1) === 2;
+
+  // 供应商（FIX：始终受控写入 state，校验从 state 读取）
   const [supplierName, setSupplierName] = useState(e?.supplierName || '');
   const [expenseType, setExpenseType] = useState<ExpenseType>(e?.expenseType || 1);
   const [item, setItem] = useState(e?.item || '');
@@ -528,20 +525,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [expenseDate, setExpenseDate] = useState(e?.expenseDate || todayStr());
   const [dueDate, setDueDate] = useState(e?.dueDate || '');
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
-  const [goodsName, setGoodsName] = useState(e?.goodsName || '');
-  const [goodsSpec, setGoodsSpec] = useState(e?.goodsSpec || '');
-  const [goodsQty, setGoodsQty] = useState(e && e.goodsQty ? String(e.goodsQty) : '');
-  const [goodsUnit, setGoodsUnit] = useState(e?.goodsUnit || '');
-  const [goodsUnitPrice, setGoodsUnitPrice] = useState(e && e.goodsUnitPrice ? e.goodsUnitPrice.toFixed(2) : '');
-  // 返货（settleMethod=4）
+  // 返货（expenseType=2）：关联商品 + 周期返还实物，无单价、不折算金额
+  const [productName, setProductName] = useState(e?.productName || '');
   const [rebateCycle, setRebateCycle] = useState<RebateCycle>(e?.rebateCycle || 1);
-  const [rebateTotalPeriods, setRebateTotalPeriods] = useState(e && e.rebateTotalPeriods ? String(e.rebateTotalPeriods) : '');
-  const [rebateGoodsName, setRebateGoodsName] = useState(e?.rebateGoodsName || '');
-  const [rebateGoodsSpec, setRebateGoodsSpec] = useState(e?.rebateGoodsSpec || '');
   const [rebateQty, setRebateQty] = useState(e && e.rebateQty ? String(e.rebateQty) : '');
-  const [rebateUnit, setRebateUnit] = useState(e?.rebateUnit || '');
-  const [rebateUnitPrice, setRebateUnitPrice] = useState(e && e.rebateUnitPrice ? e.rebateUnitPrice.toFixed(2) : '');
   const [rebateStartDate, setRebateStartDate] = useState(e?.rebateStartDate || todayStr());
+  const [maturityDate, setMaturityDate] = useState(e?.maturityDate || '');
+  const [rebateTotalPeriods, setRebateTotalPeriods] = useState(e && e.rebateTotalPeriods ? String(e.rebateTotalPeriods) : '');
   const [remark, setRemark] = useState(e?.remark || '');
   const [images, setImages] = useState<string[]>(editingImages || []);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
@@ -570,7 +560,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     }
     Alert.alert('选择供应商', undefined, [
       ...names.map((n) => ({ text: n, onPress: () => setSupplierName(n) })),
-      { text: '手动输入', onPress: () => setSupplierName(''), style: 'cancel' as const },
+      { text: '手动输入', onPress: () => {}, style: 'cancel' as const },
     ]);
   };
 
@@ -596,42 +586,35 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   };
 
   const submit = async () => {
-    if (!supplierName.trim()) { onError('请选择供应商'); return; }
+    if (!supplierName.trim()) { onError('供应商必填'); return; }
     if (!expenseDate.trim()) { onError('请填写发生日期（yyyy-mm-dd）'); return; }
     const payload: any = {
       supplierName: supplierName.trim(),
-      expenseType: settleMethod === 4 ? 1 : expenseType,
+      expenseType,
       item: item.trim(),
-      settleMethod,
       expenseDate: expenseDate.trim().slice(0, 10),
-      dueDate: settleMethod === 4 ? undefined : (settleMethod === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined)),
       remark: remark.trim(),
       images: images.map((u) => ({ imageUrl: u, imageId: null })),
     };
-    if (settleMethod === 4) {
+    if (expenseType === 2) {
+      // 返货：关联商品（可手填，无匹配则 productId=0）、无单价、不折算金额
       const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
-      const rp = Number(rebateUnitPrice.replace(/[^0-9.]/g, '')) || 0;
-      if (!rebateGoodsName.trim()) { onError('返货需填写返货品名'); return; }
-      if (rq <= 0 || rp <= 0) { onError('返货需填写数量与单价（均大于 0）'); return; }
+      if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
+      if (rq <= 0) { onError('返货需填写每期数量（大于 0）'); return; }
+      payload.settleMethod = 3;
+      payload.productId = 0;
+      payload.productName = productName.trim();
       payload.rebateCycle = rebateCycle;
-      payload.rebateGoodsName = rebateGoodsName.trim();
-      payload.rebateGoodsSpec = rebateGoodsSpec.trim();
       payload.rebateQty = rq;
-      payload.rebateUnit = rebateUnit.trim();
-      payload.rebateUnitPrice = rp;
+      payload.rebateUnit = '件';
       payload.rebateStartDate = rebateStartDate.trim().slice(0, 10) || undefined;
+      payload.maturityDate = maturityDate.trim() ? maturityDate.trim().slice(0, 10) : '';
       payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
-    } else if (expenseType === 2) {
-      const q = Number(goodsQty.replace(/[^0-9.]/g, '')) || 0;
-      const p = Number(goodsUnitPrice.replace(/[^0-9.]/g, '')) || 0;
-      if (!goodsName.trim()) { onError('货物类型需填写品名'); return; }
-      if (q <= 0 || p <= 0) { onError('货物类型需填写数量与单价（均大于 0）'); return; }
-      payload.goodsName = goodsName.trim();
-      payload.goodsSpec = goodsSpec.trim();
-      payload.goodsQty = q;
-      payload.goodsUnit = goodsUnit.trim();
-      payload.goodsUnitPrice = p;
     } else {
+      // 返钱：金额模型
+      const sm = settleMethod;
+      payload.settleMethod = sm;
+      payload.dueDate = sm === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined);
       const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
       if (a <= 0) { onError('金额需大于 0'); return; }
       payload.totalAmount = a;
@@ -666,61 +649,52 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       </SafeAreaHeader>
 
       <ScrollView style={styles.body} contentContainerStyle={styles.content}>
-        {/* 供应商 */}
+        {/* 供应商（始终受控写入 state） */}
         <Text style={styles.fieldLabel}>供应商 *</Text>
+        <TextInput
+          style={styles.input} value={supplierName} onChangeText={setSupplierName}
+          placeholder="输入供应商名，或点右侧选择" placeholderTextColor={theme.color.textAppTertiary}
+        />
         <TouchableOpacity style={styles.pickerField} onPress={pickSupplier}>
-          <Text style={[styles.pickerText, !supplierName && { color: theme.color.textAppTertiary }]}>
-            {supplierName || '点击选择（可手动输入）'}
-          </Text>
+          <Text style={[styles.pickerText, { color: theme.color.textAppTertiary }]}>从已有供应商中选择</Text>
           <Text style={styles.pickerArrow}>›</Text>
         </TouchableOpacity>
-        {!supplierName ? <TextInput style={styles.input} value={supplierName} onChangeText={setSupplierName} placeholder="或在此手动输入供应商名" placeholderTextColor={theme.color.textAppTertiary} /> : null}
 
-        {/* 费用类型（返货单不显示，自动按钱处理） */}
-        {settleMethod !== 4 && (
-          <>
-            <Text style={styles.fieldLabel}>费用类型</Text>
+        {/* 费用类型 */}
+        <Text style={styles.fieldLabel}>费用类型</Text>
+        <View style={styles.segRow}>
+          {([{ k: 1, t: '返钱' }, { k: 2, t: '返货' }] as { k: ExpenseType; t: string }[]).map((o) => (
+            <TouchableOpacity key={o.k} style={[styles.segBtn, expenseType === o.k && styles.segBtnActive]} onPress={() => setExpenseType(o.k)}>
+              <Text style={[styles.segBtnText, expenseType === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* 返钱：结算方式 + 到期日 + 金额 */}
+        {expenseType === 1 ? (
+          <View>
+            <Text style={styles.fieldLabel}>结算方式</Text>
             <View style={styles.segRow}>
-              {([{ k: 1, t: '钱' }, { k: 2, t: '货物' }] as { k: ExpenseType; t: string }[]).map((o) => (
-                <TouchableOpacity key={o.k} style={[styles.segBtn, expenseType === o.k && styles.segBtnActive]} onPress={() => setExpenseType(o.k)}>
-                  <Text style={[styles.segBtnText, expenseType === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+              {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 3, t: '按次' }, { k: 5, t: '季度结' }, { k: 6, t: '自定义' }] as { k: SettleMethod; t: string }[]).map((o) => (
+                <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
+                  <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
                 </TouchableOpacity>
               ))}
             </View>
-          </>
-        )}
-
-        {/* 钱 / 货物 字段（非返货） */}
-        {settleMethod !== 4 && (expenseType === 2 ? (
-          <View>
-            <Text style={styles.fieldLabel}>品名 *</Text>
-            <TextInput style={styles.input} value={goodsName} onChangeText={setGoodsName} placeholder="如：食用油 5L" placeholderTextColor={theme.color.textAppTertiary} />
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>数量 *</Text>
-                <TextInput style={styles.input} value={goodsQty} {...numInput(setGoodsQty)} placeholder="0" placeholderTextColor={theme.color.textAppTertiary} />
+            {settleMethod !== 3 ? (
+              <View>
+                <Text style={styles.fieldLabel}>到期日（年结/月结/季度结）</Text>
+                <TextInput style={styles.input} value={dueDate} onChangeText={setDueDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
               </View>
-              <View style={{ width: 12 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>单位</Text>
-                <TextInput style={styles.input} value={goodsUnit} onChangeText={setGoodsUnit} placeholder="箱/瓶" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-            </View>
-            <Text style={styles.fieldLabel}>单价 *</Text>
-            <TextInput style={styles.input} value={goodsUnitPrice} {...numInput(setGoodsUnitPrice)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
-            <Text style={styles.fieldLabel}>规格</Text>
-            <TextInput style={styles.input} value={goodsSpec} onChangeText={setGoodsSpec} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
-          </View>
-        ) : (
-          <View>
-            <Text style={styles.fieldLabel}>金额（元）*</Text>
+            ) : null}
+            <Text style={styles.fieldLabel}>费用金额（元）*</Text>
             <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
           </View>
-        ))}
-
-        {/* 返货配置（settleMethod=4）：周期返货抵费 */}
-        {settleMethod === 4 && (
+        ) : (
+          /* 返货：关联商品 + 周期返还实物，无单价/金额 */
           <View>
+            <Text style={styles.fieldLabel}>关联商品 *（可手填）</Text>
+            <TextInput style={styles.input} value={productName} onChangeText={setProductName} placeholder="如：矿泉水 550ml" placeholderTextColor={theme.color.textAppTertiary} />
             <Text style={styles.fieldLabel}>返货周期</Text>
             <View style={styles.segRow}>
               {([{ k: 1, t: '每月' }, { k: 2, t: '每年' }, { k: 3, t: '每季度' }] as { k: RebateCycle; t: string }[]).map((o) => (
@@ -731,65 +705,36 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
             </View>
             <View style={styles.dualRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>总期数（空=不限）</Text>
+                <Text style={styles.fieldLabel}>每期数量（件）*</Text>
+                <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="如 6" placeholderTextColor={theme.color.textAppTertiary} />
+              </View>
+              <View style={{ width: 12 }} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>期限数（0=不限）</Text>
                 <TextInput style={styles.input} value={rebateTotalPeriods} {...numInput(setRebateTotalPeriods)} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
               </View>
-              <View style={{ width: 12 }} />
+            </View>
+            <View style={styles.dualRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>起算日</Text>
+                <Text style={styles.fieldLabel}>首期日期</Text>
                 <TextInput style={styles.input} value={rebateStartDate} onChangeText={setRebateStartDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
               </View>
-            </View>
-            <Text style={styles.fieldLabel}>返货品名 *</Text>
-            <TextInput style={styles.input} value={rebateGoodsName} onChangeText={setRebateGoodsName} placeholder="如：矿泉水" placeholderTextColor={theme.color.textAppTertiary} />
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>规格</Text>
-                <TextInput style={styles.input} value={rebateGoodsSpec} onChangeText={setRebateGoodsSpec} placeholder="如 550ml" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
               <View style={{ width: 12 }} />
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>单位</Text>
-                <TextInput style={styles.input} value={rebateUnit} onChangeText={setRebateUnit} placeholder="箱/瓶" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-            </View>
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>数量 *</Text>
-                <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="0" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-              <View style={{ width: 12 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>单价 *</Text>
-                <TextInput style={styles.input} value={rebateUnitPrice} {...numInput(setRebateUnitPrice)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+                <Text style={styles.fieldLabel}>到期时间（空=长期）</Text>
+                <TextInput style={styles.input} value={maturityDate} onChangeText={setMaturityDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
               </View>
             </View>
           </View>
         )}
 
-        {/* 项目 */}
+        {/* 项目说明 */}
         <Text style={styles.fieldLabel}>项目说明</Text>
         <TextInput style={styles.input} value={item} onChangeText={setItem} placeholder="如：端架陈列费 / 堆头费" placeholderTextColor={theme.color.textAppTertiary} />
 
-        {/* 结算方式 */}
-        <Text style={styles.fieldLabel}>结算方式</Text>
-        <View style={styles.segRow}>
-          {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 5, t: '季度结' }, { k: 3, t: '按次' }, { k: 4, t: '返货' }] as { k: SettleMethod; t: string }[]).map((o) => (
-            <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
-              <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* 日期 */}
+        {/* 发生日期 */}
         <Text style={styles.fieldLabel}>发生日期 *</Text>
         <TextInput style={styles.input} value={expenseDate} onChangeText={setExpenseDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
-        {settleMethod !== 3 && settleMethod !== 4 ? (
-          <View>
-            <Text style={styles.fieldLabel}>到期日（年结/月结）</Text>
-            <TextInput style={styles.input} value={dueDate} onChangeText={setDueDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
-          </View>
-        ) : null}
 
         {/* 备注 */}
         <Text style={styles.fieldLabel}>备注</Text>
@@ -874,6 +819,8 @@ function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any
     }
   }, [target]);
 
+  const isRebate = target?.expenseType === 2;
+
   const openCamera = async () => {
     if (!permission?.granted) {
       const r = await requestPermission();
@@ -948,16 +895,16 @@ function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any
               <TouchableOpacity style={styles.backBtn} onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                 <Text style={styles.backText}>取消</Text>
               </TouchableOpacity>
-              <Text style={styles.headerTitle}>{target.settleMethod === 4 ? '确认收货' : '现场结算'}</Text>
+              <Text style={styles.headerTitle}>{isRebate ? '确认收货' : '现场结算'}</Text>
               <View style={styles.subSpacer} />
             </SafeAreaHeader>
             <ScrollView style={styles.body} contentContainerStyle={styles.content}>
-              {target.settleMethod === 4 ? (
+              {isRebate ? (
                 <>
                   <Text style={styles.hint}>{target.supplierName} · 本期返货确认收货</Text>
                   <View style={styles.card}>
-                    <InfoRow label="返货品" value={`${target.rebateGoodsName || '—'} ${target.rebateGoodsSpec || ''}`} />
-                    <InfoRow label="每期等价" value={`${target.rebateQty}${target.rebateUnit || ''} × ${money(target.rebateUnitPrice)} = ${money(Math.round((Number(target.rebateQty) || 0) * (Number(target.rebateUnitPrice) || 0) * 100) / 100)}`} />
+                    <InfoRow label="关联商品" value={`${target.productName || '—'}`} />
+                    <InfoRow label="每期" value={`${round(target.rebateQty)}${target.rebateUnit || '件'}`} />
                     <InfoRow label="本期（下次）" value={target.nextRebateDate || '—'} />
                     <InfoRow label="说明" value="确认后记为「返货确认收货」并自动推进下一期" />
                   </View>
@@ -972,7 +919,13 @@ function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any
                     Alert.alert('二次确认', msg, [
                       { text: '取消', style: 'cancel' },
                       { text: '确认收货', onPress: () => {
-                        void onConfirm({ remark: remark.trim(), images: settleImages.map((u) => ({ imageUrl: u, imageId: null })) });
+                        void onConfirm({
+                          settleAmount: undefined,
+                          paymentMethod: 3,
+                          settleDate: settleDate.trim().slice(0, 10),
+                          remark: remark.trim(),
+                          images: settleImages.map((u) => ({ imageUrl: u, imageId: null })),
+                        });
                       }}
                     ]);
                   }}>
@@ -1171,7 +1124,7 @@ function makeStyles(theme: any) {
     input: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, height: S.controlLg, paddingHorizontal: theme.spaceScale[4], color: theme.color.textApp, fontSize: theme.font.sizeV4.body },
     textArea: { height: 72, paddingTop: theme.spaceScale[3], textAlignVertical: 'top' },
     dualRow: { flexDirection: 'row' },
-    pickerField: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: theme.spaceScale[4], height: S.controlLg },
+    pickerField: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: theme.spaceScale[4], height: S.controlLg, marginTop: theme.spaceScale[2] },
     pickerText: { flex: 1, fontSize: theme.font.sizeV4.body, color: theme.color.textApp },
     pickerArrow: { color: theme.color.textAppTertiary, fontSize: 20 },
     saveBtn: { backgroundColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: S.controlLg, alignItems: 'center', justifyContent: 'center', marginTop: theme.spaceScale[4] },
