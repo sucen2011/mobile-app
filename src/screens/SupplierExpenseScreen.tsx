@@ -14,7 +14,8 @@ import {
   type ExpenseType, type SettleMethod, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
-import { listSuppliers } from '../db/localDb';
+import { listSuppliers, listProducts } from '../db/localDb';
+import type { Product } from '../db/localDb';
 
 interface Props {
   baseUrl: string;
@@ -527,6 +528,10 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
   // 返货（expenseType=2）：关联商品 + 周期返还实物，无单价、不折算金额
   const [productName, setProductName] = useState(e?.productName || '');
+  const [productId, setProductId] = useState<number>(e?.productId || 0);
+  const [productOptions, setProductOptions] = useState<Product[]>([]);
+  useEffect(() => { try { setProductOptions(listProducts()); } catch { setProductOptions([]); } }, []);
+  const filteredProducts = productOptions.filter((p) => p.name.toLowerCase().includes(productName.trim().toLowerCase())).slice(0, 6);
   const [rebateCycle, setRebateCycle] = useState<RebateCycle>(e?.rebateCycle || 1);
   const [rebateQty, setRebateQty] = useState(e && e.rebateQty ? String(e.rebateQty) : '');
   const [rebateStartDate, setRebateStartDate] = useState(e?.rebateStartDate || todayStr());
@@ -602,7 +607,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
       if (rq <= 0) { onError('返货需填写每期数量（大于 0）'); return; }
       payload.settleMethod = 3;
-      payload.productId = 0;
+      payload.productId = productId;
       payload.productName = productName.trim();
       payload.rebateCycle = rebateCycle;
       payload.rebateQty = rq;
@@ -693,11 +698,33 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         ) : (
           /* 返货：关联商品 + 周期返还实物，无单价/金额 */
           <View>
-            <Text style={styles.fieldLabel}>关联商品 *（可手填）</Text>
-            <TextInput style={styles.input} value={productName} onChangeText={setProductName} placeholder="如：矿泉水 550ml" placeholderTextColor={theme.color.textAppTertiary} />
+            <Text style={styles.fieldLabel}>关联商品 *（可手填/可搜索选择）</Text>
+            <TextInput
+              style={styles.input} value={productName}
+              onChangeText={(v) => { setProductName(v); setProductId(0); }}
+              placeholder="输入品名搜索，或选择下方匹配商品" placeholderTextColor={theme.color.textAppTertiary}
+            />
+            {productName.trim() && filteredProducts.length > 0 && (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, marginBottom: 4 }}>
+                {filteredProducts.map((p) => (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={[styles.chip, productId === p.id && styles.chipActive]}
+                    onPress={() => { setProductName(p.name); setProductId(Number(p.id)); }}
+                  >
+                    <Text style={[styles.chipText, productId === p.id && styles.chipTextActive]}>{p.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+            {productName.trim() && filteredProducts.length === 0 && productOptions.length > 0 && (
+              <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>无匹配商品，将以手填保存</Text>
+            )}
             <Text style={styles.fieldLabel}>返货周期</Text>
             <View style={styles.segRow}>
-              {([{ k: 1, t: '每月' }, { k: 2, t: '每年' }, { k: 3, t: '每季度' }] as { k: RebateCycle; t: string }[]).map((o) => (
+              {([
+              { k: 1, t: '每月' }, { k: 2, t: '每年' }, { k: 3, t: '每季度' }, { k: 4, t: '自定义' },
+            ] as { k: RebateCycle; t: string }[]).map((o) => (
                 <TouchableOpacity key={o.k} style={[styles.segBtn, rebateCycle === o.k && styles.segBtnActive]} onPress={() => setRebateCycle(o.k)}>
                   <Text style={[styles.segBtnText, rebateCycle === o.k && styles.segBtnTextActive]}>{o.t}</Text>
                 </TouchableOpacity>
@@ -1156,5 +1183,10 @@ function makeStyles(theme: any) {
     camBtnText: { color: '#fff', fontSize: theme.font.sizeV4.body },
     camShutter: { width: 68, height: 68, borderRadius: 34, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
     camShutterText: { color: '#000', fontSize: 18, fontWeight: theme.font.weight.bold },
+
+    chip: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: 10, paddingVertical: 6, marginRight: 8, marginBottom: 8 },
+    chipActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
+    chipText: { fontSize: 13, color: theme.color.textAppSecondary },
+    chipTextActive: { color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
   });
 }

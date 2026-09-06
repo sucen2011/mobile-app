@@ -8,7 +8,7 @@ import { uploadImage } from './upload';
 //   返货(expenseType=2)：关联商品档案、无单价、不折算金额；settleMethod 提交时强制为 3
 //     settledAmount 复用为「已返期数」；rebateTotalPeriods=0 表示不限期数长期有效
 //   返钱(expenseType=1)：按 settleMethod + 到期日 + 费用金额(totalAmount) 结算
-// 返货周期 rebateCycle：1=每月 2=每年 3=每季度
+// 返货周期 rebateCycle：1=每月 2=每年 3=每季度 4=自定义
 // 支付方式（payment）：1=转账 2=现金 3=冲抵货款 4=其他
 // 状态：0=待结算 1=部分结算 2=已结清
 //
@@ -41,13 +41,13 @@ function buildQuery(params?: Record<string, any>): string {
 
 export type ExpenseType = 1 | 2;               // 1=返钱 2=返货
 export type SettleMethod = 1 | 2 | 3 | 5 | 6;  // 1=年结 2=月结 3=按次 5=季度结 6=自定义（已移除 4）
-export type RebateCycle = 1 | 2 | 3;           // 1=每月 2=每年 3=每季度
+export type RebateCycle = 1 | 2 | 3 | 4;       // 1=每月 2=每年 3=每季度 4=自定义
 export type PaymentMethod = 1 | 2 | 3 | 4;     // 1=转账 2=现金 3=冲抵货款 4=其他
 export type ExpenseStatus = 0 | 1 | 2;
 
 export const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '返钱', 2: '返货' };
 export const SETTLE_METHOD_LABEL: Record<SettleMethod, string> = { 1: '年结', 2: '月结', 3: '按次', 5: '季度结', 6: '自定义' };
-export const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度' };
+export const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度', 4: '自定义' };
 export const PAYMENT_LABEL: Record<PaymentMethod, string> = { 1: '转账', 2: '现金', 3: '冲抵货款', 4: '其他' };
 
 export interface SupplierExpense {
