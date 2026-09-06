@@ -208,6 +208,7 @@ function PressForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn: 
   const types = useMemo(() => getAllBarrelTypes(), []);
   const [customer, setCustomer] = useState('');
   const [phone, setPhone] = useState('');
+  const [handler, setHandler] = useState('');
   const [date, setDate] = useState(todayStr());
   const [barrel, setBarrel] = useState('');
   const [unitPrice, setUnitPrice] = useState(0);
@@ -220,12 +221,13 @@ function PressForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn: 
 
   const submit = () => {
     if (!customer.trim()) return Alert.alert('压桶登记', '请填写客户姓名');
+    if (!phone.trim()) return Alert.alert('压桶登记', '请填写联系电话');
     if (!barrel) return Alert.alert('压桶登记', '请选择桶类型');
     if (!(count > 0)) return Alert.alert('压桶登记', '请填写数量（大于 0）');
     try {
       const now = Date.now();
       insertBarrelPress({
-        id: uuid(), no: genNo('YT', date), customer: customer.trim(), phone: phone.trim(), handler: '',
+        id: uuid(), no: genNo('YT', date), customer: customer.trim(), phone: phone.trim(), handler: handler.trim(),
         date, items: [{ barrel, count, unitPrice }],
         totalDeposit, received, change, note: note.trim(), createdAt: now,
       });
@@ -243,8 +245,11 @@ function PressForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn: 
       <FieldLabel>客户姓名 *</FieldLabel>
       <TextInput style={styles.input} value={customer} onChangeText={setCustomer} placeholder="如：张师傅" placeholderTextColor={theme.color.textAppTertiary} />
 
-      <FieldLabel>联系电话</FieldLabel>
-      <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} keyboardType="phone-pad" />
+      <FieldLabel>联系电话 *</FieldLabel>
+      <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="必填" placeholderTextColor={theme.color.textAppTertiary} keyboardType="phone-pad" />
+
+      <FieldLabel>经办人</FieldLabel>
+      <TextInput style={styles.input} value={handler} onChangeText={setHandler} placeholder="选填，如：李四" placeholderTextColor={theme.color.textAppTertiary} />
 
       <FieldLabel>压桶日期</FieldLabel>
       <DatePickerField value={date} onChange={setDate} />
@@ -289,6 +294,7 @@ function RefundForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn:
   const styles = makeStyles(theme);
   const types = useMemo(() => getAllBarrelTypes(), []);
   const [pressList] = useState<BarrelPress[]>(() => searchBarrelPress(''));
+  const [pressSearch, setPressSearch] = useState('');
   const [customer, setCustomer] = useState('');
   const [phone, setPhone] = useState('');
   const [date, setDate] = useState(todayStr());
@@ -302,12 +308,24 @@ function RefundForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn:
   const gross = Math.max(0, count) * Math.max(0, unitPrice);
   const refund = Math.max(0, gross - Math.max(0, deduct));
 
+  const filteredPress = useMemo(() => {
+    const kw = pressSearch.trim();
+    if (!kw) return pressList;
+    const lower = kw.toLowerCase();
+    return pressList.filter((p) =>
+      p.no.toLowerCase().includes(lower) ||
+      p.customer.toLowerCase().includes(lower) ||
+      p.phone.includes(lower)
+    );
+  }, [pressList, pressSearch]);
+
   const pickPress = () => {
-    if (pressList.length === 0) { Alert.alert('退桶登记', '暂无压桶记录'); return; }
-    const top = pressList.slice(0, 30);
-    Alert.alert('关联压桶单（可跳过）', undefined, [
+    const list = filteredPress.length > 0 ? filteredPress : pressList;
+    if (list.length === 0) { Alert.alert('退桶登记', '暂无压桶记录'); return; }
+    const top = list.slice(0, 30);
+    Alert.alert('关联压桶单（可跳过）', `共 ${list.length} 条${pressSearch.trim() ? '（已按搜索过滤）' : ''}`, [
       ...top.map((p) => ({
-        text: `${p.no} · ${p.customer} · ${p.date}`,
+        text: `${p.no} · ${p.customer} · ${p.phone || '无电话'} · ${p.date}`,
         onPress: () => {
           setPressNo(p.no);
           setCustomer(p.customer);
@@ -343,9 +361,14 @@ function RefundForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanOn:
   return (
     <View style={styles.card}>
       <FieldLabel>关联压桶单（选填）</FieldLabel>
+      <TextInput
+        style={styles.input} value={pressSearch}
+        onChangeText={setPressSearch}
+        placeholder="搜索单号/客户/手机号后点下面选择" placeholderTextColor={theme.color.textAppTertiary}
+      />
       <TouchableOpacity style={styles.field} onPress={pickPress}>
         <Text style={[styles.fieldText, !pressNo && { color: theme.color.textAppTertiary }]}>
-          {pressNo || '点击选择已登记的压桶单'}
+          {pressNo || `点击选择已登记的压桶单（${filteredPress.length} 条匹配）`}
         </Text>
         <Text style={styles.fieldArrow}>›</Text>
       </TouchableOpacity>
@@ -397,6 +420,9 @@ function ExchangeForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanO
   const { theme } = useTheme();
   const styles = makeStyles(theme);
   const types = useMemo(() => getAllBarrelTypes(), []);
+  const [pressList] = useState<BarrelPress[]>(() => searchBarrelPress(''));
+  const [pressSearch, setPressSearch] = useState('');
+  const [pressNo, setPressNo] = useState('');
   const [customer, setCustomer] = useState('');
   const [phone, setPhone] = useState('');
   const [date, setDate] = useState(todayStr());
@@ -409,6 +435,38 @@ function ExchangeForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanO
   const oldDeposit = oldRows.reduce((s, r) => s + (r.count > 0 ? r.count : 0) * depositOf(r.barrel), 0);
   const newDeposit = newRows.reduce((s, r) => s + (r.count > 0 ? r.count : 0) * depositOf(r.barrel), 0);
   const diff = newDeposit - oldDeposit; // >0 顾客补差，<0 退给顾客
+
+  const filteredPress = useMemo(() => {
+    const kw = pressSearch.trim();
+    if (!kw) return pressList;
+    const lower = kw.toLowerCase();
+    return pressList.filter((p) =>
+      p.no.toLowerCase().includes(lower) ||
+      p.customer.toLowerCase().includes(lower) ||
+      p.phone.includes(lower)
+    );
+  }, [pressList, pressSearch]);
+
+  const pickPress = () => {
+    const list = filteredPress.length > 0 ? filteredPress : pressList;
+    if (list.length === 0) { Alert.alert('换桶登记', '暂无压桶记录'); return; }
+    const top = list.slice(0, 30);
+    Alert.alert('关联压桶单（可跳过）', `共 ${list.length} 条${pressSearch.trim() ? '（已按搜索过滤）' : ''}`, [
+      ...top.map((p) => ({
+        text: `${p.no} · ${p.customer} · ${p.phone || '无电话'} · ${p.date}`,
+        onPress: () => {
+          setPressNo(p.no);
+          setCustomer(p.customer);
+          setPhone(p.phone);
+          if (p.items.length > 0) {
+            setOldRows(p.items.map((i) => ({ barrel: i.barrel, count: i.count })));
+          }
+        },
+      })),
+      { text: '不关联', onPress: () => setPressNo('') },
+      { text: '取消', onPress: () => undefined, style: 'cancel' as const },
+    ]);
+  };
 
   const patchOld = (idx: number, patch: Partial<BarrelExchangeItem>) =>
     setOldRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -426,7 +484,7 @@ function ExchangeForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanO
     try {
       const now = Date.now();
       insertBarrelExchange({
-        id: uuid(), no: genNo('HT', date),
+        id: uuid(), no: genNo('HT', date), pressNo,
         customer: customer.trim(), phone: phone.trim(), date,
         oldItems: oldRows, newItems: newRows,
         oldDepositTotal: oldDeposit, newDepositTotal: newDeposit, diff,
@@ -477,6 +535,19 @@ function ExchangeForm({ onSaved, lanOn, onSyncAll }: { onSaved: () => void; lanO
 
   return (
     <View style={styles.card}>
+      <FieldLabel>关联压桶单（选填）</FieldLabel>
+      <TextInput
+        style={styles.input} value={pressSearch}
+        onChangeText={setPressSearch}
+        placeholder="搜索单号/客户/手机号后点下面选择" placeholderTextColor={theme.color.textAppTertiary}
+      />
+      <TouchableOpacity style={styles.field} onPress={pickPress}>
+        <Text style={[styles.fieldText, !pressNo && { color: theme.color.textAppTertiary }]}>
+          {pressNo || `点击选择已登记的压桶单（${filteredPress.length} 条匹配）`}
+        </Text>
+        <Text style={styles.fieldArrow}>›</Text>
+      </TouchableOpacity>
+
       <FieldLabel>客户姓名 *</FieldLabel>
       <TextInput style={styles.input} value={customer} onChangeText={setCustomer} placeholder="如：张师傅" placeholderTextColor={theme.color.textAppTertiary} />
 

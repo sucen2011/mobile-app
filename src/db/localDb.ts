@@ -1038,6 +1038,7 @@ export interface BarrelExchangeItem {
 export interface BarrelExchange {
   id: string; // uuid
   no: string; // HT+日期+3位序号
+  pressNo?: string; // 关联原压桶单（本地查询用；PC 端 exchange 无此字段，上行时忽略）
   customer: string;
   phone: string;
   date: string; // YYYY-MM-DD
@@ -1093,7 +1094,7 @@ function ensureBarrelTables() {
   );`);
   db.execSync(`CREATE TABLE IF NOT EXISTS barrel_exchange (
     id TEXT PRIMARY KEY,
-    no TEXT, customer TEXT, phone TEXT, date TEXT,
+    no TEXT, pressNo TEXT, customer TEXT, phone TEXT, date TEXT,
     oldItems TEXT, newItems TEXT,
     oldDepositTotal REAL, newDepositTotal REAL, diff REAL,
     note TEXT, createdAt INTEGER,
@@ -1116,6 +1117,7 @@ function ensureBarrelTables() {
   try { db.execSync('ALTER TABLE barrel_press ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
   try { db.execSync('ALTER TABLE barrel_refund ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
   try { db.execSync('ALTER TABLE barrel_exchange ADD COLUMN synced INTEGER DEFAULT 0'); } catch { /* 已存在则忽略 */ }
+  try { db.execSync('ALTER TABLE barrel_exchange ADD COLUMN pressNo TEXT'); } catch { /* 已存在则忽略 */ }
 }
 
 function safeParsePressItems(raw: string): BarrelPressItem[] {
@@ -1211,9 +1213,9 @@ export function insertBarrelExchange(x: BarrelExchange, synced = 0) {
   const db = getDb();
   db.runSync(
     `INSERT OR REPLACE INTO barrel_exchange
-     (id,no,customer,phone,date,oldItems,newItems,oldDepositTotal,newDepositTotal,diff,note,createdAt,synced)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [x.id, x.no, x.customer, x.phone, x.date, JSON.stringify(x.oldItems),
+     (id,no,pressNo,customer,phone,date,oldItems,newItems,oldDepositTotal,newDepositTotal,diff,note,createdAt,synced)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [x.id, x.no, x.pressNo || '', x.customer, x.phone, x.date, JSON.stringify(x.oldItems),
      JSON.stringify(x.newItems), x.oldDepositTotal, x.newDepositTotal, x.diff, x.note, x.createdAt, synced]
   );
 }
@@ -1277,6 +1279,7 @@ function remoteExchangeToLocal(pc: any): BarrelExchange {
   return {
     id: `pc-${pc.id}`,
     no: pc.no || '',
+    pressNo: pc.pressNo || '',
     customer: pc.customer || '',
     phone: pc.phone || '',
     date: pc.date,
