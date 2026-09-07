@@ -17,6 +17,8 @@ interface Props {
   onNavigate: (tab: TabKey) => void;
   onNewPurchase: () => void;
   onNewRevenue: () => void;
+  /** 打开「商品管理」浮层（经营页第三个快捷操作；由上层决定是否可用） */
+  onOpenGoods?: () => void;
   onEditDraft: (id: string) => void;
   onEditRevenueDraft?: (id: string) => void;
   onSyncAll: () => void;
@@ -24,7 +26,7 @@ interface Props {
   embedded?: boolean;
 }
 
-export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue, onEditDraft, onEditRevenueDraft, onSyncAll, onRefreshPending, embedded }: Props) {
+export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue, onOpenGoods, onEditDraft, onEditRevenueDraft, onSyncAll, onRefreshPending, embedded }: Props) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
   const [drafts, setDrafts] = useState<Draft[]>(() => getAllDrafts());
@@ -95,10 +97,18 @@ export default function EntryHub({ sync, onNavigate, onNewPurchase, onNewRevenue
           <Text style={styles.primaryBtnText}>＋ 新建进货单</Text>
         </TouchableOpacity>
 
-        {/* 次要 chip：记一笔营收（不占 R2） */}
-        <TouchableOpacity style={styles.chip} onPress={onNewRevenue}>
-          <Text style={styles.chipText}>记一笔营收</Text>
-        </TouchableOpacity>
+        {/* 次要操作行：记一笔营收 + 商品管理（并列，都不占主按钮 R2 配额）。
+            商品管理做成可选：上层没传 onOpenGoods 时自动隐藏，不影响录单页独立使用。 */}
+        <View style={styles.chipRow}>
+          <TouchableOpacity style={[styles.chip, styles.chipFlex]} onPress={onNewRevenue}>
+            <Text style={styles.chipText}>记一笔营收</Text>
+          </TouchableOpacity>
+          {onOpenGoods && (
+            <TouchableOpacity style={[styles.chip, styles.chipFlex]} onPress={onOpenGoods}>
+              <Text style={styles.chipText}>📦 商品管理</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
         {/* 草稿箱 */}
         <View style={styles.card}>
@@ -238,6 +248,9 @@ function makeStyles(theme: any) {
     marginBottom: theme.spaceScale[4],
   },
   chipText: { color: theme.color.textApp, fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.medium },
+  // 次要操作行：记一笔营收 / 商品管理 并排
+  chipRow: { flexDirection: 'row', gap: theme.spaceScale[3], marginBottom: theme.spaceScale[4] },
+  chipFlex: { flex: 1, marginBottom: 0 },
   card: { backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[4] },
   cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: theme.spaceScale[3] },
   cardTitle: { fontSize: theme.font.sizeV4.h4, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },

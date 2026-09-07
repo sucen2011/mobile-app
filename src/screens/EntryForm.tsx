@@ -12,7 +12,7 @@ import { DEVICE_ID } from '../config';
 import { fetchSuppliers } from '../api/suppliers';
 import { apiFetch } from '../api/client';
 import { toLocalDateStr } from '../utils/dateLabel';
-import { parsePurchaseBill } from '@sucen/ocr-core';
+import { parsePurchaseBill, matchSupplier } from '@sucen/ocr-core';
 import DatePickerField from '../components/DatePickerField';
 // ⚠️ 必须用 /legacy 子入口：SDK 54 主入口的 readAsStringAsync 是调用即抛的弃用桩
 import * as FileSystem from 'expo-file-system/legacy';
@@ -28,6 +28,15 @@ interface ItemRow {
 
 function uuid() {
   return 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// 从单号里抽业务日期：XSD-YYYY-MM-DD-XXXX / DD-YYYYMMDD-XXXX / YT-YYYYMMDD-XXXX
+function extractDateFromOrderNo(no: string): string | null {
+  const dashed = /(?:^|\D)(\d{4})-(\d{2})-(\d{2})(?:\D|$)/.exec(no || '');
+  if (dashed) return `${dashed[1]}-${dashed[2]}-${dashed[3]}`;
+  const compact = /(?:^|\D)(\d{4})(\d{2})(\d{2})(?:\D|$)/.exec(no || '');
+  if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+  return null;
 }
 
 // 录入方式三选一：录单据(记总额) / 商品明细(逐行) / 其他(只记金额+备注)
@@ -112,6 +121,16 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
       console.warn('[EntryForm] load draft failed, opening blank form:', e?.message || e);
     }
   }, [editId]);
+
+  // 进货日期与单号保持一致：单号里已经嵌了真实业务日期（XSD-YYYY-MM-DD-XXXX / DD-YYYYMMDD-XXXX），
+  // 当 OCR 没抽出明确日期、或编辑态草稿被"今天"默认值带偏时，按单号纠正日期，避免"单号 9/6、日期 9/7"的漂移。
+  // 仅在日期确实不一致时才 set，避免覆盖用户正在手动修改的同值状态。
+  useEffect(() => {
+    const od = extractDateFromOrderNo(orderNo);
+    if (od && od !== purchaseDate) {
+      setPurchaseDate(od);
+    }
+  }, [orderNo]);
 
   // 供应商候选：优先取后端 /api/suppliers，并合并本地缓存进货单里的供应商名（离线回退）。
   //
@@ -371,14 +390,17 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
       // 单据号：仅当当前仍是默认生成的 DD- 占位时才覆盖
       if (bill.orderNo && /^DD-/.test(orderNo)) setOrderNo(bill.orderNo);
       if (bill.supplierName) {
-        // 自动带出：用识别出的简称（如「金达」）去供应商列表模糊匹配，
-        // 命中则填回全称（如「金达商贸有限公司」），没命中则保留简称，由用户手选/手动补全
+        // 自动带出：识别名（含简称/关键字，如「亚昌冷饮」「金达」）与供应商库模糊匹配，
+        // 命中则带出库内登记全称（如「鸣凰亚昌批发冷饮」「金达商贸有限公司」），
+        // 没命中则保留识别原名，由用户手选/手动补全。
+        // matchSupplier 规则：全等 > 双向包含 > 关键字字覆盖（顺序无关）> 编辑距离。
         const s = bill.supplierName;
-        setSupplierName(s);
-        const match = supplierList.find((n) => n === s || n.includes(s) || s.includes(n));
-        if (match) setSupplierName(match);
+        const m = matchSupplier(s, supplierList, (n) => n);
+        setSupplierName(m ? m.item : s);
       }
-      if (bill.date) setPurchaseDate(bill.date);
+      // 日期：OCR 明确抽出日期优先；没抽出来时，按单号内嵌日期回退，避免默认显示"今天"
+      const parsedDate = bill.date || extractDateFromOrderNo(bill.orderNo || orderNo);
+      if (parsedDate) setPurchaseDate(parsedDate);
       if (bill.arrivalDate) setArrivalDate(bill.arrivalDate);
       if (bill.total != null && !totalAmountInput) setTotalAmountInput(String(bill.total));
       if (bill.paid != null && !paidAmount) setPaidAmount(String(bill.paid));

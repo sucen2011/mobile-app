@@ -1711,6 +1711,29 @@ export function listSuppliers(): Supplier[] {
   ensureCatalogTables();
   return getDb().getAllSync('SELECT * FROM suppliers ORDER BY id DESC') as Supplier[];
 }
+
+/** 供应商总数（SQL 聚合，不实例化行） */
+export function countSuppliers(): number {
+  ensureCatalogTables();
+  const row = getDb().getFirstSync('SELECT COUNT(*) AS n FROM suppliers') as { n: number } | undefined;
+  return Number(row?.n || 0);
+}
+
+/** 关键词搜供应商：同样走 SQL LIMIT，空关键词返回空数组（详见 searchProducts 注释） */
+export function searchSuppliers(kw: string, limit = 50): Supplier[] {
+  ensureCatalogTables();
+  const trimmed = (kw || '').trim();
+  if (!trimmed) return [];
+  const like = `%${trimmed}%`;
+  const lim = Math.max(1, Math.min(200, Math.floor(limit) || 50));
+  return getDb().getAllSync(
+    `SELECT * FROM suppliers
+     WHERE name LIKE ? OR contact LIKE ? OR phone LIKE ? OR note LIKE ?
+     ORDER BY id DESC
+     LIMIT ${lim}`,
+    [like, like, like, like]
+  ) as Supplier[];
+}
 export function createSupplier(s: Omit<Supplier, 'id' | 'createdAt'>): Supplier {
   ensureCatalogTables();
   const now = Date.now();
@@ -1732,6 +1755,44 @@ export function listProducts(): Product[] {
   ensureCatalogTables();
   return getDb().getAllSync('SELECT * FROM products ORDER BY id DESC') as Product[];
 }
+
+/**
+ * 商品总数（SQL 聚合，不把行读进 JS）。
+ *
+ * UI 上要显示「共 N 条」时必须用这个，不能用 listProducts().length ——
+ * 后者会把整张表实例化成对象数组，14534 条足以把 RN 主线程卡死。
+ */
+export function countProducts(): number {
+  ensureCatalogTables();
+  const row = getDb().getFirstSync('SELECT COUNT(*) AS n FROM products') as { n: number } | undefined;
+  return Number(row?.n || 0);
+}
+
+/**
+ * 关键词搜商品（**必须** 走 SQL 层 LIMIT）。
+ *
+ * 为什么不能在 JS 里 `listProducts().filter(...)`：
+ * listProducts() 执行时整张表已经实例化成 Product 对象数组了，
+ * filter 再快也救不回来 —— 卡顿/崩溃发生在 SQL 查询那一步，不在过滤那一步。
+ *
+ * 关键词为空时返回空数组（而不是全表）：商品档案入口要求「先搜索框 + 空列表」，
+ * 默认不加载任何行，从根上避免大数据量场景白屏。
+ */
+export function searchProducts(kw: string, limit = 50): Product[] {
+  ensureCatalogTables();
+  const trimmed = (kw || '').trim();
+  if (!trimmed) return [];
+  const like = `%${trimmed}%`;
+  const lim = Math.max(1, Math.min(200, Math.floor(limit) || 50));
+  return getDb().getAllSync(
+    `SELECT * FROM products
+     WHERE name LIKE ? OR spec LIKE ? OR brand LIKE ?
+        OR categoryName LIKE ? OR supplierName LIKE ?
+     ORDER BY id DESC
+     LIMIT ${lim}`,
+    [like, like, like, like, like]
+  ) as Product[];
+}
 export function createProduct(p: Omit<Product, 'id' | 'createdAt'>): Product {
   ensureCatalogTables();
   const now = Date.now();
@@ -1752,7 +1813,14 @@ export function deleteProduct(id: number) {
   getDb().runSync('DELETE FROM products WHERE id=?', [id]);
 }
 export function listLowStockProducts(): Product[] {
-  return listProducts().filter((p) => p.safetyStock > 0 && p.stockQty < p.safetyStock);
+  ensureCatalogTables();
+  // 筛选条件下推到 SQL：老实现是 listProducts().filter(...)，先把整张表实例化成对象数组
+  // 再在 JS 里过滤 —— 上万条商品时，卡的是「全表实例化」那一步，过滤再后置也救不回来。
+  return getDb().getAllSync(
+    `SELECT * FROM products
+     WHERE safetyStock > 0 AND stockQty < safetyStock
+     ORDER BY stockQty ASC`
+  ) as Product[];
 }
 
 // ============ OCR 主图库（手机端本地，对照 PC「OCR主图生成」主图库）============

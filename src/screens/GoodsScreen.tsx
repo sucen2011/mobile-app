@@ -9,10 +9,23 @@ import type { SyncState } from '../nav';
 import {
   listCategories, createCategory, deleteCategory,
   listSuppliers, createSupplier, deleteSupplier,
-  listProducts, createProduct, deleteProduct,
+  createProduct, deleteProduct,
   listLowStockProducts,
+  searchProducts, countProducts,
+  searchSuppliers, countSuppliers,
   type Category, type Supplier, type Product,
 } from '../db/localDb';
+
+/**
+ * 单次搜索返回上限。
+ * 它是「响应速度」与「够不够看」的平衡点：50 条足够一屏翻找，
+ * 再多就要用户细化关键词 —— 而不是替他把上万条塞进内存。
+ */
+const PRODUCT_SEARCH_LIMIT = 50;
+const SUPPLIER_SEARCH_LIMIT = 50;
+// Alert 选择器硬上限：分类/供应商量级可能上千，原生 Alert 按钮过多会溢出屏幕，
+// 故只展示前 PICKER_MAX 项，其余请用「搜索」缩小范围。
+const PICKER_MAX = 30;
 
 interface Props { sync: SyncState; cacheVersion: number; }
 type ViewKey = 'main' | 'category' | 'supplier' | 'archive' | 'warning';
@@ -97,18 +110,24 @@ function MenuRow({ label, note, onPress }: { label: string; note: string; onPres
 }
 
 // ============ 分类管理 ============
-function CategoryList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
+export function CategoryList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
-  const [list, setList] = useState<Category[]>(() => listCategories());
+  const [all, setAll] = useState<Category[]>(() => listCategories());
   const [name, setName] = useState('');
-  React.useEffect(() => { setList(listCategories()); }, [tick]);
+  // 分类量级远小于商品（几百条），本地过滤即可，不必上 SQL
+  const [kw, setKw] = useState('');
+  const list = useMemo(() => {
+    const t = kw.trim();
+    return t ? all.filter((c) => c.name.includes(t)) : all;
+  }, [all, kw]);
+  React.useEffect(() => { setAll(listCategories()); }, [tick]);
 
   const submit = () => {
     try {
       createCategory(name);
       setName('');
-      setList(listCategories());
+      setAll(listCategories());
       onChanged();
     } catch (e: any) { Alert.alert('新增分类', e?.message || String(e)); }
   };
@@ -116,7 +135,7 @@ function CategoryList({ tick, onChanged }: { tick: number; onChanged: () => void
     Alert.alert('删除分类', `确认删除「${c.name}」？`, [
       { text: '取消', style: 'cancel' },
       { text: '删除', style: 'destructive', onPress: () => {
-        try { deleteCategory(c.id); setList(listCategories()); onChanged(); }
+        try { deleteCategory(c.id); setAll(listCategories()); onChanged(); }
         catch (e: any) { Alert.alert('删除失败', e?.message || String(e)); }
       } },
     ]);
@@ -132,9 +151,24 @@ function CategoryList({ tick, onChanged }: { tick: number; onChanged: () => void
         </View>
       </View>
 
-      <Text style={styles.sectionTitle}>分类列表（{list.length}）</Text>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>搜索分类</Text>
+        <TextInput
+          style={styles.input}
+          value={kw}
+          onChangeText={setKw}
+          placeholder="输入分类名筛选"
+          placeholderTextColor={theme.color.textAppTertiary}
+          autoCorrect={false}
+        />
+        <Text style={styles.resultMeta}>
+          共 {all.length} 个分类{list.length !== all.length ? ` · 匹配 ${list.length} 个` : ''}
+        </Text>
+      </View>
+
+      <Text style={styles.sectionTitle}>分类列表</Text>
       {list.length === 0
-        ? <View style={styles.empty}><Text style={styles.emptyText}>暂无分类</Text></View>
+        ? <View style={styles.empty}><Text style={styles.emptyText}>{kw.trim() ? '没有匹配的分类' : '暂无分类'}</Text></View>
         : (
           <View style={styles.card}>
             {list.map((c, i) => (
@@ -151,32 +185,64 @@ function CategoryList({ tick, onChanged }: { tick: number; onChanged: () => void
 }
 
 // ============ 供应商管理 ============
-function SupplierList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
+export function SupplierList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
-  const [list, setList] = useState<Supplier[]>(() => listSuppliers());
+  // 与商品档案同理：默认不加载，先给搜索框
+  const [kw, setKw] = useState('');
+  const [list, setList] = useState<Supplier[]>([]);
+  const [total, setTotal] = useState(() => countSuppliers());
   const [name, setName] = useState('');
   const [contact, setContact] = useState('');
   const [phone, setPhone] = useState('');
-  React.useEffect(() => { setList(listSuppliers()); }, [tick]);
+  const runSearch = (v: string) => {
+    const t = (v || '').trim();
+    setList(t ? searchSuppliers(t, SUPPLIER_SEARCH_LIMIT) : []);
+    setTotal(countSuppliers());
+  };
+  React.useEffect(() => { runSearch(kw); }, [tick]);
+  const onChangeKw = (v: string) => { setKw(v); runSearch(v); };
 
   const submit = () => {
     try {
       createSupplier({ name, contact, phone, address: '', note: '' });
       setName(''); setContact(''); setPhone('');
-      setList(listSuppliers());
+      runSearch(kw);
       onChanged();
     } catch (e: any) { Alert.alert('新增供应商', e?.message || String(e)); }
   };
   const remove = (s: Supplier) => {
     Alert.alert('删除供应商', `确认删除「${s.name}」？`, [
       { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => { deleteSupplier(s.id); setList(listSuppliers()); onChanged(); } },
+      { text: '删除', style: 'destructive', onPress: () => { deleteSupplier(s.id); runSearch(kw); onChanged(); } },
     ]);
   };
 
   return (
     <View>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>搜索供应商</Text>
+        <View style={styles.searchRow}>
+          <TextInput
+            style={[styles.input, { flex: 1 }]}
+            value={kw}
+            onChangeText={onChangeKw}
+            placeholder="名称 / 联系人 / 电话"
+            placeholderTextColor={theme.color.textAppTertiary}
+            returnKeyType="search"
+            autoCorrect={false}
+          />
+          {kw.length > 0 && (
+            <TouchableOpacity style={styles.clearBtn} onPress={() => onChangeKw('')}>
+              <Text style={styles.clearText}>清除</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <Text style={styles.resultMeta}>
+          {kw.trim() ? `匹配 ${list.length} 条 · 本机共 ${total} 条` : `本机共 ${total} 条供应商 · 输入关键词后显示`}
+        </Text>
+      </View>
+
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>新增供应商</Text>
         <FieldLabel>名称 *</FieldLabel>
@@ -188,9 +254,9 @@ function SupplierList({ tick, onChanged }: { tick: number; onChanged: () => void
         <TouchableOpacity style={styles.addBtn} onPress={submit}><Text style={styles.addBtnText}>添加供应商</Text></TouchableOpacity>
       </View>
 
-      <Text style={styles.sectionTitle}>供应商列表（{list.length}）</Text>
+      <Text style={styles.sectionTitle}>供应商列表</Text>
       {list.length === 0
-        ? <View style={styles.empty}><Text style={styles.emptyText}>暂无供应商</Text></View>
+        ? <View style={styles.empty}><Text style={styles.emptyText}>{kw.trim() ? '没有匹配的供应商，换个关键词试试' : '输入关键词开始搜索，或在上方新增供应商'}</Text></View>
         : (
           <View style={styles.card}>
             {list.map((s, i) => (
@@ -212,10 +278,17 @@ function SupplierList({ tick, onChanged }: { tick: number; onChanged: () => void
 }
 
 // ============ 商品档案 ============
-function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
+export function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
-  const [list, setList] = useState<Product[]>(() => listProducts());
+  // 关键：初始 **空列表**。
+  // 老实现是 useState(() => listProducts())，一进页面就把整张 products 表实例化成对象数组，
+  // 14534 条直接在渲染期把主线程打死 → 白屏。现在改成「先搜索框 + 空列表」，
+  // 只有用户输入关键词后才走 SQL 的 LIKE + LIMIT 50，最多进内存 50 条。
+  const [kw, setKw] = useState('');
+  const [list, setList] = useState<Product[]>([]);
+  const [total, setTotal] = useState(() => countProducts());
+  // 分类/供应商只用于「新增商品」表单的下拉选择，量级远小于商品表，全量取没问题
   const categories = useMemo(() => listCategories(), [tick]);
   const suppliers = useMemo(() => listSuppliers(), [tick]);
 
@@ -233,20 +306,33 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
   const [note, setNote] = useState('');
   const [adding, setAdding] = useState(false); // 商品档案默认展示列表，新增表单收起
 
-  React.useEffect(() => { setList(listProducts()); }, [tick]);
+  /**
+   * 按关键词重搜。**空关键词 = 不加载任何行**（这是防崩溃的核心约定）。
+   * SQL 层 LIMIT 保证单次最多进内存 PRODUCT_SEARCH_LIMIT 条。
+   */
+  const runSearch = (v: string) => {
+    const t = (v || '').trim();
+    setList(t ? searchProducts(t, PRODUCT_SEARCH_LIMIT) : []);
+    setTotal(countProducts());
+  };
+  // tick 变化（下拉刷新 / 下行同步完成）时按当前关键词重搜 —— 不再全表重拉
+  React.useEffect(() => { runSearch(kw); }, [tick]);
+  const onChangeKw = (v: string) => { setKw(v); runSearch(v); };
 
   const pickCategory = () => {
     if (categories.length === 0) { Alert.alert('选择分类', '暂无分类，请先在「商品分类」中添加'); return; }
-    Alert.alert('选择分类', undefined, [
-      ...categories.map((c) => ({ text: c.name, onPress: () => setCategoryName(c.name) })),
+    const shown = categories.slice(0, PICKER_MAX);
+    Alert.alert('选择分类', buildPickerHint(categories.length, PICKER_MAX), [
+      ...shown.map((c) => ({ text: c.name, onPress: () => setCategoryName(c.name) })),
       { text: '不选', onPress: () => setCategoryName('') },
       { text: '取消', onPress: () => undefined, style: 'cancel' as const },
     ]);
   };
   const pickSupplier = () => {
     if (suppliers.length === 0) { Alert.alert('选择供应商', '暂无供应商，请先在「供应商管理」中添加'); return; }
-    Alert.alert('选择供应商', undefined, [
-      ...suppliers.map((s) => ({ text: s.name, onPress: () => setSupplierName(s.name) })),
+    const shown = suppliers.slice(0, PICKER_MAX);
+    Alert.alert('选择供应商', buildPickerHint(suppliers.length, PICKER_MAX), [
+      ...shown.map((s) => ({ text: s.name, onPress: () => setSupplierName(s.name) })),
       { text: '不选', onPress: () => setSupplierName('') },
       { text: '取消', onPress: () => undefined, style: 'cancel' as const },
     ]);
@@ -260,14 +346,14 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
       });
       setName(''); setSpec(''); setUnit(''); setCategoryName(''); setBrand(''); setSupplierName('');
       setPurchasePrice(0); setRetailPrice(0); setStockQty(0); setSafetyStock(0); setShelfLifeDays(0); setNote('');
-      setList(listProducts());
+      runSearch(kw);
       onChanged();
     } catch (e: any) { Alert.alert('新增商品', e?.message || String(e)); }
   };
   const remove = (p: Product) => {
     Alert.alert('删除商品', `确认删除「${p.name}」？`, [
       { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => { deleteProduct(p.id); setList(listProducts()); onChanged(); } },
+      { text: '删除', style: 'destructive', onPress: () => { deleteProduct(p.id); runSearch(kw); onChanged(); } },
     ]);
   };
 
@@ -280,15 +366,41 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
           仅本机存储：手机端新增 / 修改的商品不会同步到电脑端。商品主数据请以电脑端为准，这里用于快捷查询与临时录入。
         </Text>
       </View>
+      {/* 搜索前置：进入本页不加载任何商品行，输入关键词后才命中 SQL 的 LIKE + LIMIT */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>搜索商品</Text>
+        <View style={styles.searchRow}>
+          <TextInput
+            style={[styles.input, { flex: 1 }]}
+            value={kw}
+            onChangeText={onChangeKw}
+            placeholder="商品名 / 规格 / 品牌 / 分类 / 供应商"
+            placeholderTextColor={theme.color.textAppTertiary}
+            returnKeyType="search"
+            autoCorrect={false}
+          />
+          {kw.length > 0 && (
+            <TouchableOpacity style={styles.clearBtn} onPress={() => onChangeKw('')}>
+              <Text style={styles.clearText}>清除</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <Text style={styles.resultMeta}>
+          {kw.trim()
+            ? `匹配 ${list.length} 条${list.length >= PRODUCT_SEARCH_LIMIT ? `（单次最多 ${PRODUCT_SEARCH_LIMIT} 条，请细化关键词）` : ''} · 本机共 ${total} 条`
+            : `本机共 ${total} 条商品 · 输入关键词后显示（数据量较大，不做全量加载）`}
+        </Text>
+      </View>
+
       <View style={styles.card}>
         <View style={styles.listHeadRow}>
-          <Text style={styles.sectionTitle}>商品列表（{list.length}）</Text>
+          <Text style={styles.sectionTitle}>商品列表</Text>
           <TouchableOpacity style={styles.addMiniBtn} onPress={() => setAdding((v) => !v)}>
             <Text style={styles.addMiniBtnText}>{adding ? '收起' : '＋ 新增'}</Text>
           </TouchableOpacity>
         </View>
         {list.length === 0
-          ? <View style={styles.empty}><Text style={styles.emptyText}>暂无商品，可在电脑端商品档案维护，或点「＋ 新增」在本机录入（不同步电脑端）</Text></View>
+          ? <View style={styles.empty}><Text style={styles.emptyText}>{kw.trim() ? '没有匹配的商品，换个关键词试试' : '输入关键词开始搜索。也可点「＋ 新增」在本机录入（不同步电脑端）'}</Text></View>
           : (
             <View>
               {list.map((p, i) => (
@@ -394,7 +506,7 @@ function ProductList({ tick, onChanged }: { tick: number; onChanged: () => void 
 }
 
 // ============ 库存预警 ============
-function WarningList({ tick }: { tick: number }) {
+export function WarningList({ tick }: { tick: number }) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
   const [list, setList] = useState<Product[]>(() => listLowStockProducts());
@@ -432,6 +544,12 @@ function WarningList({ tick }: { tick: number }) {
 }
 
 // ============ 通用小件 ============
+/** 选择器提示文案：总量 ≤ 上限时只报总数；超出则提醒「仅显示前 N 项」 */
+function buildPickerHint(total: number, max: number): string {
+  if (total <= max) return `共 ${total} 项`;
+  return `共 ${total} 项，仅显示前 ${max} 项，请先搜索缩小范围`;
+}
+
 function FieldLabel({ children }: { children: React.ReactNode }) {
   const { theme } = useTheme();
   return <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 10, marginBottom: 4 }}>{children}</Text>;
@@ -454,6 +572,15 @@ function makeStyles(theme: any) {
     addMiniBtn: { backgroundColor: theme.color.primarySoft, borderRadius: theme.radius.md, paddingHorizontal: 12, paddingVertical: 6 },
     addMiniBtnText: { color: theme.color.primaryVivid, fontSize: 13, fontWeight: '600' },
     inlineForm: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+    // 搜索前置相关
+    searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+    clearBtn: {
+      backgroundColor: theme.color.surfaceApp, borderWidth: 1, borderColor: theme.color.borderApp,
+      borderRadius: theme.radius.pill, paddingHorizontal: 12, paddingVertical: 8, minHeight: S.controlLg,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    clearText: { color: theme.color.textAppSecondary, fontSize: 13 },
+    resultMeta: { fontSize: 12, color: theme.color.textAppTertiary, marginTop: 6, marginBottom: 4, lineHeight: 18 },
     input: { backgroundColor: theme.color.surfaceRaised, borderRadius: theme.radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, color: theme.color.textApp, minHeight: S.controlLg },
     field: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceRaised, borderRadius: theme.radius.md, paddingHorizontal: 12, paddingVertical: 12, minHeight: S.controlLg },
     fieldText: { flex: 1, fontSize: 15, color: theme.color.textApp },

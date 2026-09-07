@@ -77,6 +77,11 @@ export interface SupplierExpense {
   nextRebateDate: string;
   maturityDate: string;
   rebateTotalPeriods: number;
+  // 返钱分期计划（expenseType=1 且启用计划时有值；totalAmount=计划合计推导）
+  planJson: PlanPeriod[];
+  planTotal: number;
+  planSettled: number;
+  planPending: number;
   createdAt: string;
 }
 
@@ -100,6 +105,19 @@ export interface ExpenseImage {
   imageId: number | null;
   imageUrl: string;
   sort: number;
+}
+
+// 返钱分期计划期次（与 PC 端 PlanPeriod 对齐；后端 plan_json TEXT 列存储）
+// status：0=待结 1=已结 3=作废；逾期= status===0 且 planDate < 今天（前端计算）
+export interface PlanPeriod {
+  seq: number;
+  planDate: string;
+  planAmount: number;
+  remark?: string;
+  status: number;
+  settledAmount: number;
+  settledDate: string | null;
+  images?: { url: string }[];
 }
 
 export interface ExpenseDetail {
@@ -156,6 +174,8 @@ export type ExpensePayload = {
   maturityDate?: string;
   rebateTotalPeriods?: number;
   images?: ExpenseImageDraft[];
+  // 返钱分期计划：启用计划时传期次数组（总额由计划合计推导）；关闭计划时传 [] 清空残留
+  planJson?: PlanPeriod[];
 };
 
 export async function updateExpense(baseUrl: string, id: number, payload: ExpensePayload): Promise<SupplierExpense> {
@@ -223,7 +243,7 @@ export async function createExpense(baseUrl: string, payload: ExpensePayload): P
 export async function settleExpense(
   baseUrl: string,
   id: number,
-  payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[] }
+  payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }
 ): Promise<SupplierExpense> {
   return apiJson<SupplierExpense>(baseUrl, `/api/supplier-expenses/${id}/settle`, {
     method: 'POST',

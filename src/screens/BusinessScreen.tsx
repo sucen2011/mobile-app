@@ -10,6 +10,8 @@ interface Props {
   onNavigate: (tab: TabKey) => void;
   onNewPurchase: () => void;
   onNewRevenue: () => void;
+  /** 打开「商品管理」分支入口浮层 */
+  onOpenGoods?: () => void;
   onEditDraft: (id: string) => void;
   onEditRevenueDraft?: (id: string) => void;
   onOpenDetail: (rec: { kind: 'revenue' | 'purchase' | 'draft' | 'revenueDraft'; id: string }) => void;
@@ -28,6 +30,7 @@ export default function BusinessScreen({
   onNavigate,
   onNewPurchase,
   onNewRevenue,
+  onOpenGoods,
   onEditDraft,
   onEditRevenueDraft,
   onOpenDetail,
@@ -49,6 +52,7 @@ export default function BusinessScreen({
         onNavigate={onNavigate}
         onNewPurchase={onNewPurchase}
         onNewRevenue={onNewRevenue}
+        onOpenGoods={onOpenGoods}
         onEditDraft={onEditDraft}
         onEditRevenueDraft={onEditRevenueDraft}
         onSyncAll={onSyncAll}

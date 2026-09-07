@@ -12,6 +12,7 @@ import {
   EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
   type ExpenseType, type SettleMethod, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
+  type PlanPeriod,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
 import { listSuppliers, listProducts } from '../db/localDb';
@@ -31,6 +32,8 @@ function todayStr(): string {
   const day = `${d.getDate()}`.padStart(2, '0');
   return `${d.getFullYear()}-${m}-${day}`;
 }
+
+const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => i + 1);
 
 function money(n: number): string {
   return `¥${Number(n || 0).toFixed(2)}`;
@@ -64,6 +67,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const [detail, setDetail] = useState<ExpenseDetail | null>(null);
 
   const [settleTarget, setSettleTarget] = useState<SupplierExpense | null>(null);
+  const [settlePlanSeq, setSettlePlanSeq] = useState<number | null>(null); // 从详情「结算本期/补交本期」带入期次
   const [editingTarget, setEditingTarget] = useState<SupplierExpense | null>(null);
   const [editingImages, setEditingImages] = useState<string[]>([]);
   const [reverseTarget, setReverseTarget] = useState<SupplierExpense | null>(null);
@@ -114,7 +118,14 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
     setEditingTarget(null);
     setEditingImages([]);
     setReverseTarget(null);
+    setSettlePlanSeq(null);
     void loadAll();
+  };
+
+  // 从详情计划卡「结算本期 / 补交本期」进入：带期次打开结算弹窗
+  const handleSettlePeriod = (exp: SupplierExpense, seq: number) => {
+    setSettlePlanSeq(seq);
+    setSettleTarget(exp);
   };
 
   const showItemActions = (e: SupplierExpense) => {
@@ -230,6 +241,9 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                     </View>
                     <View style={styles.itemFoot}>
                       <StatusTag status={e.status} />
+                      {!isRebate && Array.isArray(e.planJson) && e.planJson.length > 0 ? (
+                        <Text style={styles.planListTag}>{`已 ${e.planJson.filter((p) => p.status === 1).length}/${e.planJson.length} 期`}</Text>
+                      ) : null}
                       {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
                     </View>
                   </TouchableOpacity>
@@ -255,12 +269,14 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
           styles={styles}
           baseUrl={baseUrl}
           target={settleTarget}
-          onClose={() => setSettleTarget(null)}
-          onConfirm={async (payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[] }) => {
+          presetPlanSeq={settlePlanSeq}
+          onClose={() => { setSettleTarget(null); setSettlePlanSeq(null); }}
+          onConfirm={async (payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }) => {
             try {
               await settleExpense(baseUrl, settleTarget!.id, payload);
               Alert.alert('已结算', '该笔费用已记录一笔结算');
               setSettleTarget(null);
+              setSettlePlanSeq(null);
               await loadAll();
             } catch (e: any) { Alert.alert('结算失败', e?.message || ''); }
           }}
@@ -295,6 +311,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
           <DetailBody
             theme={theme} styles={styles} baseUrl={baseUrl} detail={detail}
             onSettle={() => setSettleTarget(detail.expense)}
+            onSettlePeriod={handleSettlePeriod}
             onEdit={() => startEdit(detail.expense)}
             onDelete={() => confirmDelete(detail.expense)}
             onReverse={() => setReverseTarget(detail.expense)}
@@ -307,12 +324,14 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
         styles={styles}
         baseUrl={baseUrl}
         target={settleTarget}
-        onClose={() => setSettleTarget(null)}
-        onConfirm={async (payload: { settleAmount: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[] }) => {
+        presetPlanSeq={settlePlanSeq}
+        onClose={() => { setSettleTarget(null); setSettlePlanSeq(null); }}
+        onConfirm={async (payload: { settleAmount: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }) => {
           try {
             await settleExpense(baseUrl, settleTarget!.id, payload);
             Alert.alert('已结算', '该笔费用已记录一笔结算');
             setSettleTarget(null);
+            setSettlePlanSeq(null);
             if (detailId) { const d = await getExpenseDetail(baseUrl, detailId); if (d) setDetail(d); }
             await loadAll();
           } catch (e: any) { Alert.alert('结算失败', e?.message || ''); }
@@ -372,10 +391,11 @@ function StatusTag({ status }: { status: ExpenseStatus }) {
 }
 
 // ============ 详情正文 ============
-function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete, onReverse }: any) {
+function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, onEdit, onDelete, onReverse }: any) {
   const e = detail.expense;
   const isRebate = e.expenseType === 2;
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const planList: PlanPeriod[] = Array.isArray(e.planJson) ? e.planJson : [];
   return (
     <View>
       {/* 金额 / 期数 */}
@@ -396,6 +416,74 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onEdit, onDelete
           {e.overdue ? <Text style={[styles.overdueLine, { color: theme.color.danger }]}>⚠ 已逾期（到期 {e.dueDate}）</Text> : null}
         </View>
       )}
+
+      {/* 结算计划（返钱分期）：每期 计划/已结/未结 + 凭证 + 结算/补交入口 */}
+      {!isRebate && planList.length > 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>
+            {`结算计划（${planList.filter((p) => p.status === 1).length}/${planList.length} 期已结）`}
+          </Text>
+          <Text style={styles.planSummary}>{`计划合计 ${money(e.planTotal)} · 已结 ${money(e.planSettled)}`}</Text>
+          {planList.map((p) => {
+            const settled = Number(p.settledAmount) || 0;
+            const planAmt = Number(p.planAmount) || 0;
+            const unsettled = Math.round((planAmt - settled) * 100) / 100;
+            const od = p.status === 0 && p.planDate && p.planDate < todayStr();
+            const statusText = p.status === 1 ? '已结' : p.status === 3 ? '作废' : od ? '逾期' : '待结';
+            const tagColor = p.status === 1 ? theme.color.success : p.status === 3 ? theme.color.textAppTertiary : od ? theme.color.danger : theme.color.warning;
+            const cardBg = p.status === 1 ? theme.color.primarySoft : od ? theme.color.danger + '14' : theme.color.surfaceApp;
+            const imgs = Array.isArray(p.images) ? p.images : [];
+            return (
+              <View key={p.seq} style={[styles.planCard, { backgroundColor: cardBg, borderColor: od ? theme.color.danger : theme.color.dividerApp }]}>
+                <View style={styles.planCardHead}>
+                  <Text style={styles.planCardTitle}>
+                    {`第 ${p.seq} 期`}
+                    <Text style={styles.planCardDate}>{`  ${p.planDate || '—'}`}</Text>
+                  </Text>
+                  <View style={[styles.planTag, { backgroundColor: tagColor + '1A' }]}>
+                    <Text style={[styles.planTagText, { color: tagColor }]}>{statusText}</Text>
+                  </View>
+                </View>
+                <View style={styles.planAmountRow}>
+                  <Text style={styles.planAmtLabel}>{'计划 '}</Text>
+                  <Text style={styles.planAmtVal}>{money(planAmt)}</Text>
+                  <Text style={[styles.planAmtLabel, { color: theme.color.success }]}>{'  已结 '}</Text>
+                  <Text style={[styles.planAmtVal, { color: theme.color.success }]}>{money(settled)}</Text>
+                  <Text style={[styles.planAmtLabel, { color: unsettled > 0 ? theme.color.danger : theme.color.textAppTertiary }]}>{'  未结 '}</Text>
+                  <Text style={[styles.planAmtVal, { color: unsettled > 0 ? theme.color.danger : theme.color.textAppTertiary }]}>{money(unsettled)}</Text>
+                </View>
+                {p.remark ? <Text style={styles.planRemark}>{`备注：${p.remark}`}</Text> : null}
+                <View style={styles.planBottomRow}>
+                  {p.status === 1 && imgs.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', flex: 1 }}>
+                      {imgs.map((im, k) => (
+                        (im.url || '').toLowerCase().endsWith('.pdf') ? (
+                          <Text key={k} style={styles.planNoVoucher}>📄 PDF凭证 </Text>
+                        ) : (
+                          <TouchableOpacity key={k} onPress={() => setPreviewUri(toAbsoluteUrl(baseUrl, im.url))} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+                            <Image source={{ uri: toAbsoluteUrl(baseUrl, im.url) }} style={{ width: 44, height: 44, borderRadius: 6, marginRight: 6, borderWidth: 1, borderColor: theme.color.dividerApp }} />
+                          </TouchableOpacity>
+                        )
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={styles.planNoVoucher}>{`暂无凭证${unsettled > 0 ? '（未结算）' : '（已结清）'}`}</Text>
+                  )}
+                  {p.status !== 1 && p.status !== 3 && e.status < 2 ? (
+                    <TouchableOpacity
+                      style={[styles.planActionBtn, { backgroundColor: od ? theme.color.danger : theme.color.primaryVivid }]}
+                      onPress={() => onSettlePeriod && onSettlePeriod(e, p.seq)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.planActionText}>{od ? '补交本期' : '结算本期'}</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
 
       {/* 基本信息 */}
       <View style={styles.card}>
@@ -526,6 +614,15 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [expenseDate, setExpenseDate] = useState(e?.expenseDate || todayStr());
   const [dueDate, setDueDate] = useState(e?.dueDate || '');
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
+  // 返钱分期计划（与 PC 端结算计划段对齐；planAmount 草稿期允许字符串，提交时强转数字）
+  const [planMode, setPlanMode] = useState<boolean>(Array.isArray(e?.planJson) && e!.planJson.length > 0);
+  const [planList, setPlanList] = useState<any[]>(Array.isArray(e?.planJson) ? e!.planJson.map((p: PlanPeriod) => ({ ...p })) : []);
+  const [peakAmt, setPeakAmt] = useState('200');
+  const [offAmt, setOffAmt] = useState('100');
+  const [planYear, setPlanYear] = useState(String(new Date().getFullYear()));
+  const [planCount, setPlanCount] = useState('12');
+  const [planStartMonth, setPlanStartMonth] = useState('1');
+  const [peakMonths, setPeakMonths] = useState<number[]>([4, 5, 6, 7, 8, 9]);
   // 返货（expenseType=2）：关联商品 + 周期返还实物，无单价、不折算金额
   const [productName, setProductName] = useState(e?.productName || '');
   const [productId, setProductId] = useState<number>(e?.productId || 0);
@@ -616,13 +713,32 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       payload.maturityDate = maturityDate.trim() ? maturityDate.trim().slice(0, 10) : '';
       payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
     } else {
-      // 返钱：金额模型
-      const sm = settleMethod;
-      payload.settleMethod = sm;
-      payload.dueDate = sm === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined);
-      const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
-      if (a <= 0) { onError('金额需大于 0'); return; }
-      payload.totalAmount = a;
+      // 返钱：金额模型 或 分期计划
+      const valid = planList.filter((p) => p.planDate && Number(p.planAmount) > 0);
+      if (planMode) {
+        // 启用分期计划：总额由计划合计推导（后端强校验），结算方式强制分期类，dueDate=末期待结
+        if (valid.length === 0) { onError('已启用分期计划，请先生成或添加有效期次（含日期与金额）'); return; }
+        payload.settleMethod = [1, 2, 5, 6].includes(settleMethod) ? settleMethod : 2;
+        payload.dueDate = undefined;
+        payload.planJson = valid.map((p, i) => ({
+          seq: i + 1,
+          planDate: String(p.planDate).slice(0, 10),
+          planAmount: Number(p.planAmount) || 0,
+          remark: p.remark || '',
+          status: Number(p.status || 0),
+          settledAmount: Number(p.settledAmount || 0),
+          settledDate: p.settledDate || null,
+          images: Array.isArray(p.images) ? p.images : [],
+        }));
+      } else {
+        const sm = settleMethod;
+        payload.settleMethod = sm;
+        payload.dueDate = sm === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined);
+        const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+        if (a <= 0) { onError('金额需大于 0'); return; }
+        payload.totalAmount = a;
+        payload.planJson = []; // 关闭计划：清空残留
+      }
     }
     setSaving(true);
     try {
@@ -642,6 +758,71 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     keyboardType: 'numeric' as const,
     onChangeText: (v: string) => setter(v.replace(/[^0-9.]/g, '')),
   });
+
+  // ===== 返钱分期计划：生成器（与 PC 端结算计划段逻辑一致）=====
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const lastDayOf = (y: number, m: number) => new Date(y, m, 0).getDate();
+  const fmtMoney = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
+  const clampMonth = (v: string) => Math.min(12, Math.max(1, Math.floor(Number(v) || 1)));
+  const planCountNum = () => Math.min(60, Math.max(1, Math.floor(Number(planCount) || 12)));
+
+  // 旺季淡季：自定义期数 / 起始年月 / 旺季月份，支持跨年
+  const genSeasonal = () => {
+    const peak = Number(peakAmt.replace(/[^0-9.]/g, '')) || 0;
+    const off = Number(offAmt.replace(/[^0-9.]/g, '')) || 0;
+    const list: any[] = [];
+    let y = Number(planYear) || new Date().getFullYear();
+    let m = clampMonth(planStartMonth);
+    for (let i = 0; i < planCountNum(); i++) {
+      const isPeak = peakMonths.includes(m);
+      list.push({
+        seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`,
+        planAmount: isPeak ? peak : off,
+        remark: `${y}年${m}月·${isPeak ? '旺季返' : '淡季返'}`,
+        status: 0, settledAmount: 0, settledDate: null, images: [],
+      });
+      m += 1; if (m > 12) { m = 1; y += 1; }
+    }
+    setPlanList(list);
+  };
+
+  // 按月均摊：按费用总额 N 期等额（末期补差）
+  const genEqualMonthly = () => {
+    const total = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+    if (total <= 0) { Alert.alert('请先填写费用总额', '按月均摊模板需要先填「费用总额（元）」'); return; }
+    const count = planCountNum();
+    const base = fmtMoney(total / count);
+    const list: any[] = [];
+    let y = Number(planYear) || new Date().getFullYear();
+    let m = clampMonth(planStartMonth);
+    for (let i = 0; i < count; i++) {
+      const amt = i === count - 1 ? fmtMoney(total - base * (count - 1)) : base;
+      list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·均摊`, status: 0, settledAmount: 0, settledDate: null, images: [] });
+      m += 1; if (m > 12) { m = 1; y += 1; }
+    }
+    setPlanList(list);
+  };
+
+  // 按季：4 个季度等额（末期补差）
+  const genQuarterly = () => {
+    const total = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+    if (total <= 0) { Alert.alert('请先填写费用总额', '按季模板需要先填「费用总额（元）」'); return; }
+    const base = fmtMoney(total / 4);
+    const list: any[] = [];
+    let y = Number(planYear) || new Date().getFullYear();
+    let m = clampMonth(planStartMonth);
+    for (let i = 0; i < 4; i++) {
+      const amt = i === 3 ? fmtMoney(total - base * 3) : base;
+      list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·季度返`, status: 0, settledAmount: 0, settledDate: null, images: [] });
+      m += 3; if (m > 12) { m -= 12; y += 1; }
+    }
+    setPlanList(list);
+  };
+
+  const addPlanRow = () => setPlanList((prev) => [...prev, { seq: prev.length + 1, planDate: '', planAmount: '', remark: '', status: 0, settledAmount: 0, settledDate: null, images: [] }]);
+  const updatePlanRow = (seq: number, patch: any) => setPlanList((prev) => prev.map((p) => (p.seq === seq ? { ...p, ...patch } : p)));
+  const removePlanRow = (seq: number) => setPlanList((prev) => prev.filter((p) => p.seq !== seq).map((p, i) => ({ ...p, seq: i + 1 })));
+  const planTotal = planList.reduce((s, p) => s + (Number(p.planAmount) || 0), 0);
 
   return (
     <View style={styles.root}>
@@ -675,25 +856,133 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           ))}
         </View>
 
-        {/* 返钱：结算方式 + 到期日 + 金额 */}
+        {/* 返钱：一次性结清 或 按计划分期（结算计划段，与 PC 端模板对齐） */}
         {expenseType === 1 ? (
           <View>
             <Text style={styles.fieldLabel}>结算方式</Text>
             <View style={styles.segRow}>
-              {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 3, t: '按次' }, { k: 5, t: '季度结' }, { k: 6, t: '自定义' }] as { k: SettleMethod; t: string }[]).map((o) => (
-                <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
-                  <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
-                </TouchableOpacity>
-              ))}
+              <TouchableOpacity style={[styles.segBtn, !planMode && styles.segBtnActive]} onPress={() => setPlanMode(false)}>
+                <Text style={[styles.segBtnText, !planMode && styles.segBtnTextActive]}>一次性结清</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.segBtn, planMode && styles.segBtnActive]} onPress={() => { setPlanMode(true); if (planList.length === 0) genSeasonal(); }}>
+                <Text style={[styles.segBtnText, planMode && styles.segBtnTextActive]}>按计划分期</Text>
+              </TouchableOpacity>
             </View>
-            {settleMethod !== 3 ? (
-              <View>
-                <Text style={styles.fieldLabel}>到期日（年结/月结/季度结）</Text>
-                <TextInput style={styles.input} value={dueDate} onChangeText={setDueDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-            ) : null}
-            <Text style={styles.fieldLabel}>费用金额（元）*</Text>
-            <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+            {!planMode ? (
+              <>
+                <Text style={styles.fieldLabel}>结账周期</Text>
+                <View style={styles.segRow}>
+                  {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 3, t: '按次' }, { k: 5, t: '季度结' }, { k: 6, t: '自定义' }] as { k: SettleMethod; t: string }[]).map((o) => (
+                    <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
+                      <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                {settleMethod !== 3 ? (
+                  <View>
+                    <Text style={styles.fieldLabel}>到期日（年结/月结/季度结）</Text>
+                    <TextInput style={styles.input} value={dueDate} onChangeText={setDueDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                ) : null}
+                <Text style={styles.fieldLabel}>费用金额（元）*</Text>
+                <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+              </>
+            ) : (
+              <>
+                {/* 快速模板（可选）：一键生成计划，随后可逐行微调 */}
+                <Text style={styles.fieldLabel}>快速模板（可选）</Text>
+                <View style={styles.chipRow}>
+                  <TouchableOpacity style={styles.chip} onPress={genEqualMonthly}><Text style={styles.chipText}>按月均摊</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.chip} onPress={genQuarterly}><Text style={styles.chipText}>按季</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.chip} onPress={genSeasonal}><Text style={styles.chipText}>旺季淡季</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.chip} onPress={() => setPlanList([])}><Text style={styles.chipText}>自定义</Text></TouchableOpacity>
+                </View>
+
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>费用总额（元）</Text>
+                    <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="按月均摊/按季需要" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>年份</Text>
+                    <TextInput style={styles.input} value={planYear} keyboardType="number-pad" onChangeText={(v) => setPlanYear(v.replace(/[^0-9]/g, '').slice(0, 4))} placeholder="2026" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                </View>
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>期数</Text>
+                    <TextInput style={styles.input} value={planCount} keyboardType="number-pad" onChangeText={(v) => setPlanCount(v.replace(/[^0-9]/g, '').slice(0, 2))} placeholder="6/8/12" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>起始月（1-12）</Text>
+                    <TextInput style={styles.input} value={planStartMonth} keyboardType="number-pad" onChangeText={(v) => setPlanStartMonth(v.replace(/[^0-9]/g, '').slice(0, 2))} placeholder="1" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                </View>
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>旺季月返（元）</Text>
+                    <TextInput style={styles.input} value={peakAmt} {...numInput(setPeakAmt)} placeholder="如 200" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>淡季月返（元）</Text>
+                    <TextInput style={styles.input} value={offAmt} {...numInput(setOffAmt)} placeholder="如 100" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                </View>
+                <Text style={styles.fieldLabel}>旺季月份（可多选）</Text>
+                <View style={styles.chipRow}>
+                  {MONTH_OPTIONS.map((m) => {
+                    const on = peakMonths.includes(m);
+                    return (
+                      <TouchableOpacity key={m} style={[styles.chip, on && styles.chipActive]} onPress={() => setPeakMonths((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : prev.concat(m)))}>
+                        <Text style={[styles.chipText, on && styles.chipTextActive]}>{`${m}月`}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* 计划子表：期次 / 金额 / 日期 / 备注 单行编辑 */}
+                {planList.map((p) => (
+                  <View key={p.seq} style={styles.planEditRow}>
+                    <View style={styles.planEditSeqPill}>
+                      <Text style={styles.planEditSeqText}>{p.seq}</Text>
+                    </View>
+                    <TextInput
+                      style={[styles.input, styles.planEditAmt]}
+                      value={p.planAmount === 0 || p.planAmount ? String(p.planAmount) : ''}
+                      {...numInput((v) => updatePlanRow(p.seq, { planAmount: v }))}
+                      placeholder="金额" placeholderTextColor={theme.color.textAppTertiary}
+                    />
+                    <TextInput
+                      style={[styles.input, styles.planEditDate]}
+                      value={p.planDate}
+                      onChangeText={(v) => updatePlanRow(p.seq, { planDate: v })}
+                      placeholder="yyyy-mm-dd"
+                      placeholderTextColor={theme.color.textAppTertiary}
+                    />
+                    <TextInput
+                      style={[styles.input, styles.planEditRemark]}
+                      value={p.remark || ''}
+                      onChangeText={(v) => updatePlanRow(p.seq, { remark: v })}
+                      placeholder="备注"
+                      placeholderTextColor={theme.color.textAppTertiary}
+                    />
+                    <TouchableOpacity style={styles.planDelBtn} onPress={() => removePlanRow(p.seq)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Text style={styles.planDelText}>×</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+                <TouchableOpacity style={styles.planAddBtn} onPress={addPlanRow}>
+                  <Text style={styles.planAddText}>＋ 添加一期</Text>
+                </TouchableOpacity>
+                <View style={styles.planTotalRow}>
+                  <Text style={styles.planNoVoucher}>{`共 ${planList.length} 期 · 各期可独立结算留凭证`}</Text>
+                  <Text style={[styles.planAmtVal, { color: theme.color.primaryVivid }]}>{`计划合计 ${money(planTotal)}`}</Text>
+                </View>
+              </>
+            )}
           </View>
         ) : (
           /* 返货：关联商品 + 周期返还实物，无单价/金额 */
@@ -824,27 +1113,42 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 }
 
 // ============ 现场结算 Modal ============
-function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any) {
+function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, onConfirm }: any) {
   const [amount, setAmount] = useState('');
   const [payment, setPayment] = useState<PaymentMethod>(1);
   const [settleDate, setSettleDate] = useState(todayStr());
   const [remark, setRemark] = useState('');
   const [settleImages, setSettleImages] = useState<string[]>([]);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [planSeq, setPlanSeq] = useState<number | null>(null); // 分期计划：本次结算对应期次
   const [camOpen, setCamOpen] = useState(false);
   const [camType, setCamType] = useState<CameraType>('back');
   const [permission, requestPermission] = useCameraPermissions();
   const camRef = React.useRef<any>(null);
 
+  const planPeriods: PlanPeriod[] = Array.isArray(target?.planJson) ? target.planJson : [];
+  const hasPlan = planPeriods.length > 0;
+  const selPeriod = planPeriods.find((p) => p.seq === planSeq);
+  const selOverdue = !!selPeriod && selPeriod.status === 0 && !!selPeriod.planDate && selPeriod.planDate < todayStr();
+
+  const amountForPeriod = (p: PlanPeriod | undefined) =>
+    p ? Math.max(0, (Number(p.planAmount) || 0) - (Number(p.settledAmount) || 0)).toFixed(2) : '';
+
   React.useEffect(() => {
     if (target) {
-      setAmount(target.unsettledAmount ? target.unsettledAmount.toFixed(2) : '');
+      const plans: PlanPeriod[] = Array.isArray(target.planJson) ? target.planJson : [];
+      const open = plans.filter((p) => p.status === 0);
+      const defSeq = presetPlanSeq != null ? presetPlanSeq : (open[0] ? open[0].seq : null);
+      setPlanSeq(defSeq);
+      const sel = plans.find((p) => p.seq === defSeq);
+      if (sel) setAmount(amountForPeriod(sel));
+      else setAmount(target.unsettledAmount ? target.unsettledAmount.toFixed(2) : '');
       setPayment(target.expenseType === 2 ? 3 : 1);
       setSettleDate(todayStr());
       setRemark('');
       setSettleImages([]);
     }
-  }, [target]);
+  }, [target, presetPlanSeq]);
 
   const isRebate = target?.expenseType === 2;
 
@@ -965,6 +1269,34 @@ function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any
                     {target.supplierName} · 未结算 {money(target.unsettledAmount)}（{EXPENSE_TYPE_LABEL[target.expenseType as ExpenseType]}）
                   </Text>
 
+                  {hasPlan ? (
+                    <>
+                      <Text style={styles.fieldLabel}>结算期次</Text>
+                      <View style={styles.chipRow}>
+                        {planPeriods.map((p) => {
+                          const od = p.status === 0 && !!p.planDate && p.planDate < todayStr();
+                          const active = planSeq === p.seq;
+                          const done = p.status === 1;
+                          return (
+                            <TouchableOpacity
+                              key={p.seq}
+                              style={[styles.chip, active && styles.chipActive, done && { opacity: 0.55 }]}
+                              disabled={p.status !== 0}
+                              onPress={() => { setPlanSeq(p.seq); setAmount(amountForPeriod(p)); }}
+                            >
+                              <Text style={[styles.chipText, active && styles.chipTextActive, !active && done && { color: theme.color.success }, !active && od && { color: theme.color.danger }]}>
+                                {`第${p.seq}期${done ? '·已结' : od ? '·逾期' : ''}`}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      {selOverdue ? (
+                        <Text style={[styles.hint, { color: theme.color.danger, marginTop: 8 }]}>⚠ 所选期次已逾期，本次结算将视为补交</Text>
+                      ) : null}
+                    </>
+                  ) : null}
+
                   <Text style={styles.fieldLabel}>结算金额（元）*</Text>
                   <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
 
@@ -988,7 +1320,12 @@ function SettleModal({ theme, styles, baseUrl, target, onClose, onConfirm }: any
                   <TouchableOpacity style={styles.saveBtn} onPress={() => {
                     const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
                     if (a <= 0) { Alert.alert('请输入结算金额'); return; }
-                    void onConfirm({ settleAmount: a, paymentMethod: payment, settleDate: settleDate.trim().slice(0, 10), remark: remark.trim(), images: settleImages.map((u) => ({ imageUrl: u, imageId: null })) });
+                    if (hasPlan && planSeq == null) { Alert.alert('请选择结算期次'); return; }
+                    void onConfirm({
+                      settleAmount: a, paymentMethod: payment, settleDate: settleDate.trim().slice(0, 10), remark: remark.trim(),
+                      images: settleImages.map((u) => ({ imageUrl: u, imageId: null })),
+                      ...(hasPlan && planSeq != null ? { planSeq } : {}),
+                    });
                   }}>
                     <Text style={styles.saveBtnText}>确认结算 {money(Number(amount.replace(/[^0-9.]/g, '') || 0))}</Text>
                   </TouchableOpacity>
@@ -1188,5 +1525,43 @@ function makeStyles(theme: any) {
     chipActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
     chipText: { fontSize: 13, color: theme.color.textAppSecondary },
     chipTextActive: { color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
+
+    // 返钱分期计划
+    planSummary: { fontSize: 12, color: theme.color.textAppTertiary, marginTop: -theme.spaceScale[2], marginBottom: theme.spaceScale[2] },
+    planCard: { borderWidth: 1, borderRadius: theme.radius.md, padding: theme.spaceScale[3], marginTop: theme.spaceScale[2] },
+    planCardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    planCardTitle: { fontSize: 14, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },
+    planCardDate: { fontSize: 12, fontWeight: '400', color: theme.color.textAppTertiary },
+    planTag: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+    planTagText: { fontSize: 12, fontWeight: theme.font.weight.medium },
+    planAmountRow: { flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', marginTop: 6 },
+    planAmtLabel: { fontSize: 13, color: theme.color.textAppSecondary },
+    planAmtVal: { fontSize: 13, fontWeight: theme.font.weight.semibold, color: theme.color.textApp, fontVariant: ['tabular-nums'] },
+    planRemark: { fontSize: 12, color: theme.color.textAppSecondary, marginTop: 6 },
+    planBottomRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
+    planNoVoucher: { fontSize: 12, color: theme.color.textAppTertiary, flexShrink: 1 },
+    planActionBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: theme.radius.md, marginLeft: 8 },
+    planActionText: { color: '#fff', fontSize: 13, fontWeight: theme.font.weight.medium },
+    planListTag: { fontSize: 12, color: theme.color.primaryVivid, backgroundColor: theme.color.primarySoft, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, fontWeight: theme.font.weight.medium },
+    planEditRow: {
+      flexDirection: 'row', alignItems: 'center', gap: 6,
+      borderWidth: 1, borderLeftWidth: 3, borderColor: theme.color.borderApp, borderLeftColor: theme.color.primaryVivid,
+      borderRadius: theme.radius.md, padding: 6, marginTop: theme.spaceScale[2],
+      backgroundColor: theme.color.surfaceApp,
+    },
+    planEditSeqPill: {
+      width: 34, height: 34, borderRadius: 17,
+      backgroundColor: theme.color.primarySoft,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    planEditSeqText: { fontSize: 13, fontWeight: theme.font.weight.semibold, color: theme.color.primaryVivid },
+    planEditAmt: { width: 72, height: 40, paddingHorizontal: 8, fontSize: 13, fontVariant: ['tabular-nums'] },
+    planEditDate: { width: 96, height: 40, paddingHorizontal: 8, fontSize: 13 },
+    planEditRemark: { flex: 1, height: 40, paddingHorizontal: 8, fontSize: 13, marginRight: 0 },
+    planDelBtn: { width: 28, height: 40, alignItems: 'center', justifyContent: 'center' },
+    planDelText: { color: theme.color.danger, fontSize: 20 },
+    planAddBtn: { borderWidth: 1, borderStyle: 'dashed', borderColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: 40, alignItems: 'center', justifyContent: 'center', marginTop: theme.spaceScale[2] },
+    planAddText: { color: theme.color.primaryVivid, fontSize: 13 },
+    planTotalRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: theme.spaceScale[2] },
   });
 }

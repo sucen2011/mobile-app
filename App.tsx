@@ -19,7 +19,8 @@ import type { TabKey, SyncState } from './src/nav';
 import OverviewScreen from './src/screens/OverviewScreen';
 import BusinessScreen from './src/screens/BusinessScreen';
 import BarrelWaterScreen from './src/screens/BarrelWaterScreen';
-import GoodsScreen from './src/screens/GoodsScreen';
+import SupplyChainScreen from './src/screens/SupplyChainScreen';
+import GoodsManageScreen from './src/screens/GoodsManageScreen';
 import Settings from './src/screens/Settings';
 import LoginScreen from './src/screens/LoginScreen';
 import EntryForm from './src/screens/EntryForm';
@@ -30,7 +31,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'home', label: '首页', icon: '🏠' },
   { key: 'business', label: '经营', icon: '🧾' },
   { key: 'barrel', label: '桶装水', icon: '💧' },
-  { key: 'goods', label: '商品', icon: '📦' },
+  { key: 'supply', label: '供采', icon: '🤝' },
   { key: 'mine', label: '我的', icon: '👤' },
 ];
 
@@ -88,6 +89,8 @@ function AppInner() {
   const [entryEditId, setEntryEditId] = useState<string | undefined>();
   const [showEntry, setShowEntry] = useState(false);
   const [showRevenue, setShowRevenue] = useState(false);
+  // 「商品管理」浮层：由经营页第三个快捷操作唤起（商品 Tab 已改为供采 Tab）
+  const [showGoods, setShowGoods] = useState(false);
   const [revenueEditId, setRevenueEditId] = useState<string | undefined>();
   // kind 'revenueDraft'：尚未推送到服务端的本机营收草稿（离线记的那一笔）
   const [detail, setDetail] = useState<{
@@ -377,6 +380,7 @@ function AppInner() {
               setRevenueEditId(undefined);
               setShowRevenue(true);
             }}
+            onOpenGoods={() => setShowGoods(true)}
             onEditDraft={(id) => openEntry(id)}
             onEditRevenueDraft={(id) => {
               setRevenueEditId(id);
@@ -388,7 +392,7 @@ function AppInner() {
           />
         )}
         {tab === 'barrel' && <BarrelWaterScreen sync={sync} cacheVersion={cacheVersion} onSyncAll={() => void doSync(true)} />}
-        {tab === 'goods' && <GoodsScreen sync={sync} cacheVersion={cacheVersion} />}
+        {tab === 'supply' && <SupplyChainScreen sync={sync} baseUrl={baseUrl} />}
         {tab === 'mine' && (
           <Settings baseUrl={baseUrl} onBaseUrlChange={handleBaseUrlChange} onTestConnection={testConnection} sync={sync} syncPrefs={syncPrefs} onSyncPrefsChange={handleSyncPrefsChange} onLogout={handleLogout} />
         )}
@@ -450,6 +454,13 @@ function AppInner() {
               setRevenueEditId(undefined);
             }}
           />
+        </View>
+      )}
+
+      {/* 模态：商品管理（经营页「📦 商品管理」唤起） */}
+      {showGoods && (
+        <View style={styles.modal}>
+          <GoodsManageScreen onClose={() => setShowGoods(false)} />
         </View>
       )}
 
