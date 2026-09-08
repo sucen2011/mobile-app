@@ -1137,11 +1137,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         if (a <= 0) { onError('陈列费金额需大于 0'); return; }
         payload.totalAmount = a;
       } else if (returnType === 2) {
-        // 到期返货：复用返货那套，totalAmount=0、记到期应返数量、固定 1 期
-        const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
-        if (rq <= 0) { onError('到期应返数量需大于 0'); return; }
+        // 到期返货：totalAmount=0、固定 1 期；应返数量由后端按「铺货总量 − 已售」派生，前端不再手填/传值
         payload.totalAmount = 0;
-        payload.rebateQty = rq;
         payload.rebateUnit = validItems[0]?.unit?.trim() || '件';
         payload.rebateTotalPeriods = 1;
       }
@@ -1630,11 +1627,12 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
               </>
             ) : (
-              <>
-                <Text style={styles.fieldLabel}>{`到期应返数量（${consignItems[0]?.unit?.trim() || '件'}）*`}</Text>
-                <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="如 30" placeholderTextColor={theme.color.textAppTertiary} />
-                <Text style={[styles.hint, { marginTop: 4 }]}>{`单位跟随铺货明细单位（${consignItems[0]?.unit?.trim() || '件'}）`}</Text>
-              </>
+              <View>
+                <Text style={styles.fieldLabel}>到期应返数量（只读，服务端自动计算）</Text>
+                <View style={[styles.input, styles.consignRemainBox]}>
+                  <Text style={styles.consignRemainText}>{`${Math.max(0, consignTotalQty - (Number(soldQty.replace(/[^0-9.]/g, '')) || 0))} ${consignItems[0]?.unit?.trim() || '件'}（= 铺货总量 − 已售）`}</Text>
+                </View>
+              </View>
             )}
           </View>
         )}
