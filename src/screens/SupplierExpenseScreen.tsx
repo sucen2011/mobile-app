@@ -593,8 +593,8 @@ function buildBrandAgg(list: SupplierExpense[]): BrandAgg[] {
       map.set(key, row);
     }
     row.count += 1;
-    // 返货（expenseType=2）与寄售到期返货（expenseType=3 & returnType=2）的 totalAmount 恒为 0、
-    // settledAmount 复用为「已收期数」，因此金额聚合必须排除，否则会把期数当钱加进去；
+    // 返货（expenseType=2）与寄售到期返货（expenseType=3 & returnType=2）：settledAmount 复用为「已收期数」，
+    // totalAmount 现存放供应商给付货值，但金额聚合仍须排除二者，否则会把期数当钱加进去；
     // 两者都计入 rebateCount（品牌汇总「返货 N」口径统一）。
     if (isRebateLikeExpense(e)) row.rebateCount += 1;
     if (!isRebateLikeExpense(e)) {
@@ -624,7 +624,7 @@ function buildExpenseCsv(list: SupplierExpense[]): string {
   const lines = [header.map(csvCell).join(',')];
   (list || []).forEach((e) => {
     const isRebate = e.expenseType === 2;
-    // 寄售到期返货（expenseType=3 & returnType=2）与返货同理：totalAmount 恒为 0、settledAmount 为已收期数，按返货口径导出
+    // 寄售到期返货（expenseType=3 & returnType=2）与返货同理：settledAmount 为已收期数，按返货口径导出（totalAmount 现存放货值）
     const nonMoney = isRebate || (e.expenseType === 3 && e.returnType === 2);
     // 返货的「未结算」= 还剩几期没确认收货；不限期数（rebateTotalPeriods=0）显示「长期」（与 PC 一致）
     const rebateLeft = (Number(e.rebateTotalPeriods) || 0) > 0
@@ -816,11 +816,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
           <Text style={styles.sectionTitle}>寄售协议</Text>
           <InfoRow label="铺货商品" value={e.productName || '—'} />
           <InfoRow label="铺货数量" value={`${round(e.consignQty)}${e.consignUnit || '件'}`} />
-          <InfoRow label="已售数量" value={`${round(e.soldQty)}${e.consignUnit || '件'}`} />
-          <InfoRow label="应还数量" value={`${round(e.consignRemainQty)}${e.consignUnit || '件'}`} />
           <InfoRow label="铺货总货值（进货价合计）" value={`¥${money(e.consignTotalValue)}`} />
-          <InfoRow label="已售货值（零售价）" value={`¥${money((Number(e.soldQty) || 0) * (Number(e.consignSalePrice) || 0))}`} />
-          <InfoRow label="应还货值（零售价）" value={`¥${money((Number(e.consignRemainQty) || 0) * (Number(e.consignSalePrice) || 0))}`} />
           <InfoRow label="铺货到期日" value={e.maturityDate || '—'} />
           <InfoRow label="到期返还形式" value={e.returnType === 2 ? '到期返货' : '到期返钱'} />
           {Array.isArray(e.consignItems) && e.consignItems.length > 0 ? (
@@ -1031,7 +1027,6 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       ? e!.consignItems.map((it: ConsignItem) => ({ ...it }))
       : [blankConsignItem()]
   );
-  const [soldQty, setSoldQty] = useState(e && e.soldQty ? String(e.soldQty) : '0');
   const [consignMaturity, setConsignMaturity] = useState(e?.maturityDate || '');
   const [returnType, setReturnType] = useState<number>(e?.returnType || 1);
   // 铺货总数量（含搭赠）= 所有行 qty 合计；铺货总价值 = 仅正常行 Σ(数量 × 进货价)（本地派生展示）
@@ -1103,7 +1098,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     // 切换费用类型时复位结算时机到该类型默认值：寄售/返货→到期给(2)，返钱→现给(1)
     setSettlementTiming(k === 3 ? 2 : (k === 2 ? 2 : 1));
     setProductName(''); setProductId(0);
-    setConsignItems([blankConsignItem()]); setSoldQty('0'); setConsignMaturity(''); setReturnType(1);
+    setConsignItems([blankConsignItem()]); setConsignMaturity(''); setReturnType(1);
     setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
     setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
   };
@@ -1129,10 +1124,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     };
     if (expenseType === 3) {
       // 寄售铺货（两层模型）：一层=铺货商品明细(ConsignItem 多行，可含搭赠行)，二层=到期结算方式(仅返钱/返货)
-      const sq = Number(soldQty.replace(/[^0-9.]/g, '')) || 0;
       const validItems = consignItems.filter((it) => it.name.trim());
       if (validItems.length === 0) { onError('请至少添加一行铺货商品'); return; }
-      if (sq > consignTotalQty) { onError('已售数量不能大于铺货总数量'); return; }
       if (!consignMaturity.trim()) { onError('请填写寄售到期日'); return; }
       // 后端会从 consignItems 推导 productId/productName/consignUnit/consignQty/consignCostPrice/consignSalePrice/consignTotalValue
       payload.settleMethod = 3;
@@ -1142,7 +1135,6 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         costPrice: it.type === 'gift' ? 0 : (Number(it.costPrice) || 0),
         salePrice: it.type === 'gift' ? 0 : (Number(it.salePrice) || 0),
       }));
-      payload.soldQty = sq;
       payload.maturityDate = consignMaturity.trim().slice(0, 10);
       payload.returnType = returnType;
       if (returnType === 1) {
@@ -1151,8 +1143,10 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         if (a <= 0) { onError('陈列费金额需大于 0'); return; }
         payload.totalAmount = a;
       } else if (returnType === 2) {
-        // 到期返货：totalAmount=0、固定 1 期；应返数量由后端按「铺货总量 − 已售」派生，前端不再手填/传值
-        payload.totalAmount = 0;
+        // 到期返货：供应商以货物支付陈列费，货值 = totalAmount（固定费用金额），固定 1 期，不扣减库存
+        const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+        if (a <= 0) { onError('供应商给付货值需大于 0'); return; }
+        payload.totalAmount = a;
         payload.rebateUnit = validItems[0]?.unit?.trim() || '件';
         payload.rebateTotalPeriods = 1;
       }
@@ -1640,20 +1634,6 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
               <Text style={styles.summaryText}>{`铺货总数量 ${consignTotalQty} 件 · 铺货总价值 ¥${round(consignTotalValue)}`}</Text>
             </View>
 
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>已售数量</Text>
-                <TextInput style={styles.input} value={soldQty} {...numInput(setSoldQty)} placeholder="0" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-              <View style={{ width: 12 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>应还数量</Text>
-                <View style={[styles.input, styles.consignRemainBox]}>
-                  <Text style={styles.consignRemainText}>{`${Math.max(0, consignTotalQty - (Number(soldQty.replace(/[^0-9.]/g, '')) || 0))}`}</Text>
-                </View>
-              </View>
-            </View>
-            <Text style={[styles.hint, { marginTop: 4 }]}>到期需归还给供应商</Text>
 
             <Text style={styles.fieldLabel}>寄售到期日 *</Text>
             <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
@@ -1674,12 +1654,10 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
               </>
             ) : (
-              <View>
-                <Text style={styles.fieldLabel}>到期应返数量（只读，服务端自动计算）</Text>
-                <View style={[styles.input, styles.consignRemainBox]}>
-                  <Text style={styles.consignRemainText}>{`${Math.max(0, consignTotalQty - (Number(soldQty.replace(/[^0-9.]/g, '')) || 0))} ${consignItems[0]?.unit?.trim() || '件'}（= 铺货总量 − 已售）`}</Text>
-                </View>
-              </View>
+              <>
+                <Text style={styles.fieldLabel}>供应商给付货值（元）*</Text>
+                <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+              </>
             )}
           </View>
         )}

@@ -93,9 +93,7 @@ export interface SupplierExpense {
   // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
   consignQty: number;
   consignUnit: string;
-  soldQty: number;
   returnType: number;
-  consignRemainQty: number; // 应还数量 = consignQty - soldQty，后端计算下发，前端只读
   // 寄售铺货（expenseType=3）：进货价 / 零售价（后端从明细派生，前端只读展示）
   consignCostPrice: number;
   consignSalePrice: number;
@@ -189,7 +187,6 @@ export interface ExpenseQuery {
   // 寄售铺货（expenseType=3）查询扩展字段（后端按需要可选使用）
   consignQty?: number;
   consignUnit?: string;
-  soldQty?: number;
   returnType?: number;
 }
 
@@ -226,7 +223,6 @@ export type ExpensePayload = {
   // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
   consignQty?: number;
   consignUnit?: string;
-  soldQty?: number;
   returnType?: number;
   consignCostPrice?: number;
   consignSalePrice?: number;
