@@ -39,22 +39,30 @@ function buildQuery(params?: Record<string, any>): string {
   return s ? `?${s}` : '';
 }
 
-export type ExpenseType = 1 | 2;               // 1=返钱 2=返货
+export type ExpenseType = 1 | 2 | 3;           // 1=返钱 2=返货 3=寄售铺货
 export type SettleMethod = 1 | 2 | 3 | 5 | 6;  // 1=年结 2=月结 3=按次 5=季度结 6=自定义（已移除 4）
 export type RebateCycle = 1 | 2 | 3 | 4;       // 1=每月 2=每年 3=每季度 4=自定义
 export type PaymentMethod = 1 | 2 | 3 | 4;     // 1=转账 2=现金 3=冲抵货款 4=其他
 export type ExpenseStatus = 0 | 1 | 2;
 
-export const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '返钱', 2: '返货' };
+export const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '返钱', 2: '返货', 3: '寄售' };
 export const SETTLE_METHOD_LABEL: Record<SettleMethod, string> = { 1: '年结', 2: '月结', 3: '按次', 5: '季度结', 6: '自定义' };
 export const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度', 4: '自定义' };
 export const PAYMENT_LABEL: Record<PaymentMethod, string> = { 1: '转账', 2: '现金', 3: '冲抵货款', 4: '其他' };
+
+// 统一判定：返货(expenseType=2) 与 寄售到期返货(expenseType=3 & returnType=2)
+// 走「确认收货 + 期次推进」结算；其余（返钱、寄售到期返钱）走金额结算。
+// 搭配赠送不是返还形式（returnType 只有 1/2），故不在此列。
+// 移动端与后端 seIsRebateLike 共用同一语义，避免两端各写一套导致口径漂移。
+export const isRebateLikeExpense = (e: { expenseType: number; returnType?: number }): boolean =>
+  e.expenseType === 2 || (e.expenseType === 3 && e.returnType === 2);
 
 export interface SupplierExpense {
   id: number;
   expenseNo: string;
   supplierId: string;
   supplierName: string;
+  brand: string;
   expenseType: ExpenseType;
   item: string;
   settleMethod: SettleMethod;
@@ -77,6 +85,21 @@ export interface SupplierExpense {
   nextRebateDate: string;
   maturityDate: string;
   rebateTotalPeriods: number;
+  // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
+  consignQty: number;
+  consignUnit: string;
+  soldQty: number;
+  returnType: number;
+  consignRemainQty: number; // 应还数量 = consignQty - soldQty，后端计算下发，前端只读
+  // 寄售铺货（expenseType=3）：进货价 / 零售价（后端从明细派生，前端只读展示）
+  consignCostPrice: number;
+  consignSalePrice: number;
+  // 寄售铺货多行商品明细（expenseType=3）：含正常/搭赠；type='gift' 不参与总价值
+  consignItems: ConsignItem[];
+  // 铺货总价值 = Σ 非搭赠行 qty×costPrice，后端已算好，前端只读展示
+  consignTotalValue: number;
+  // 返货每期独立结算：已确认期次的 seq 数组（如 [1,3] 表示第1、3期已确认收货）；老数据空缺
+  rebateSettledPeriods?: number[];
   // 返钱分期计划（expenseType=1 且启用计划时有值；totalAmount=计划合计推导）
   planJson: PlanPeriod[];
   planTotal: number;
@@ -95,6 +118,7 @@ export interface SettlementRecord {
   isReversal: boolean;
   isRebate: boolean;
   rebatePeriod: string;
+  rebateSeq: number;
   remark: string;
   createdAt: string;
   images?: ExpenseImage[];
@@ -105,6 +129,19 @@ export interface ExpenseImage {
   imageId: number | null;
   imageUrl: string;
   sort: number;
+}
+
+// 寄售铺货商品明细行（expenseType=3）：多行，每行一个「类型」属性。
+// type='gift'（搭赠）行单价为 0，不参与铺货总价值计算；type='normal' 参与。
+export interface ConsignItem {
+  productId: number;
+  name: string;
+  spec: string;
+  unit: string;
+  qty: number;
+  costPrice: number;  // 进货价（即表格里的「单价」）
+  salePrice: number;  // 零售价
+  type: 'normal' | 'gift';
 }
 
 // 返钱分期计划期次（与 PC 端 PlanPeriod 对齐；后端 plan_json TEXT 列存储）
@@ -143,6 +180,12 @@ export interface ExpenseQuery {
   settleMethod?: SettleMethod;
   status?: ExpenseStatus;
   overdue?: 0 | 1;
+  brand?: string;
+  // 寄售铺货（expenseType=3）查询扩展字段（后端按需要可选使用）
+  consignQty?: number;
+  consignUnit?: string;
+  soldQty?: number;
+  returnType?: number;
 }
 
 /**
@@ -157,6 +200,7 @@ export interface ExpenseImageDraft {
 export type ExpensePayload = {
   supplierId?: string;
   supplierName: string;
+  brand?: string;
   expenseType: ExpenseType;
   item?: string;
   settleMethod?: SettleMethod;
@@ -173,6 +217,15 @@ export type ExpensePayload = {
   rebateStartDate?: string;
   maturityDate?: string;
   rebateTotalPeriods?: number;
+  // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
+  consignQty?: number;
+  consignUnit?: string;
+  soldQty?: number;
+  returnType?: number;
+  consignCostPrice?: number;
+  consignSalePrice?: number;
+  // 寄售铺货多行商品明细（expenseType=3）：前端只传 consignItems，后端派生 productId/productName/consignUnit/consignQty/consignCostPrice/consignSalePrice
+  consignItems?: ConsignItem[];
   images?: ExpenseImageDraft[];
   // 返钱分期计划：启用计划时传期次数组（总额由计划合计推导）；关闭计划时传 [] 清空残留
   planJson?: PlanPeriod[];
@@ -199,7 +252,7 @@ export async function deleteExpense(baseUrl: string, e: SupplierExpense): Promis
 export async function reverseExpense(
   baseUrl: string,
   id: number,
-  payload: { settleAmount: number; paymentMethod?: PaymentMethod; remark?: string }
+  payload: { settleAmount?: number; paymentMethod?: PaymentMethod; remark?: string }
 ): Promise<SupplierExpense> {
   return apiJson<SupplierExpense>(baseUrl, `/api/supplier-expenses/${id}/reverse`, {
     method: 'POST',
@@ -212,9 +265,17 @@ export async function fetchExpenses(baseUrl: string, params?: ExpenseQuery): Pro
   return Array.isArray(list) ? list : [];
 }
 
-export async function fetchExpenseSummary(baseUrl: string): Promise<ExpenseSummary> {
+// 品牌联想：返回某供应商（不传则返回全部）历史填过的去重品牌，驱动移动端新增/编辑表单与列表筛选
+export async function fetchExpenseBrands(baseUrl: string, supplierName?: string): Promise<string[]> {
+  const data = await apiJson<string[]>(baseUrl, `/api/supplier-expenses/brands${buildQuery(supplierName ? { supplierName } : undefined)}`);
+  return Array.isArray(data) ? data : [];
+}
+
+// params 与列表共用同一套筛选（keyword / supplierId / expenseType / settleMethod / status / brand / overdue），
+// 使「按品牌筛选」时统计卡只算该品牌，避免统计与列表口径漂移（后端已把 list 与 summary 抽成同一个 seExpenseFilter）。
+export async function fetchExpenseSummary(baseUrl: string, params?: ExpenseQuery): Promise<ExpenseSummary> {
   try {
-    const d = await apiJson<ExpenseSummary>(baseUrl, '/api/supplier-expenses/summary');
+    const d = await apiJson<ExpenseSummary>(baseUrl, `/api/supplier-expenses/summary${buildQuery(params)}`);
     if (d && typeof d === 'object') return d;
   } catch (e) {
     console.warn('[supplier-expense] 统计卡加载失败：', e);

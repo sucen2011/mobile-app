@@ -1,18 +1,22 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert, TextInput,
-  Switch, Modal, Image, RefreshControl,
+  Switch, Modal, Image, RefreshControl, Share, ActivityIndicator, Platform,
 } from 'react-native';
+// ⚠️ 必须从 expo-file-system/legacy 导入：SDK 54+ 主入口的 writeAsStringAsync 是调用即 throw 的弃用桩
+import * as FileSystem from 'expo-file-system/legacy';
 import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
 import { useTheme } from '../theme/ThemeProvider';
 import { SafeAreaHeader } from '../components/SafeArea';
+import DatePickerField from '../components/DatePickerField';
 import {
   fetchExpenses, getExpenseDetail, fetchExpenseSummary, createExpense, updateExpense, settleExpense,
-  deleteExpense, reverseExpense, uploadExpenseImage,
+  deleteExpense, reverseExpense, uploadExpenseImage, fetchExpenseBrands,
   EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL,
+  isRebateLikeExpense,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
   type ExpenseType, type SettleMethod, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
-  type PlanPeriod,
+  type PlanPeriod, type ConsignItem,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
 import { listSuppliers, listProducts } from '../db/localDb';
@@ -24,7 +28,7 @@ interface Props {
 }
 
 type ViewKey = 'list' | 'form' | 'detail';
-type TypeFilter = '' | '1' | '2';
+type TypeFilter = '' | '1' | '2' | '3';
 
 function todayStr(): string {
   const d = new Date();
@@ -50,6 +54,93 @@ function toAbsoluteUrl(baseUrl: string, url: string): string {
   return `${baseUrl.replace(/\/$/, '')}${url.startsWith('/') ? url : `/${url}`}`;
 }
 
+// 返货周期 step（月）：与 PC buildRebatePlan 对齐
+const REBATE_STEP_MONTHS: Record<number, number> = { 1: 1, 2: 12, 3: 3, 4: 0 };
+
+function addMonths(dateStr: string, n: number): string {
+  if (!dateStr) return '';
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (isNaN(d.getTime())) return dateStr;
+  const baseY = d.getFullYear();
+  const baseM = d.getMonth() + n;
+  const ny = baseY + Math.floor(baseM / 12);
+  const nm = ((baseM % 12) + 12) % 12;
+  const nd = Math.min(d.getDate(), new Date(ny, nm + 1, 0).getDate());
+  const mm = `${nm + 1}`.padStart(2, '0');
+  const dd = `${nd}`.padStart(2, '0');
+  return `${ny}-${mm}-${dd}`;
+}
+
+export interface RebatePeriod {
+  seq: number;
+  planDate: string;
+  planQty: number;
+  settled: boolean;
+  remark: string;
+  images?: { url: string }[];
+}
+
+// 由 返货 协议字段生成虚拟期次（与 PC DetailDrawer.buildRebatePlan 逻辑一致）
+// settlements 用于把每一期的「备注 + 凭证图片」挂到对应期次卡片上（按 rebate_seq 关联），三端一致
+function buildRebatePeriods(e: any, settlements: any[] = []): RebatePeriod[] {
+  if (!e || !isRebateLikeExpense(e)) return [];
+  const { rebateStartDate, rebateCycle, rebateQty, rebateTotalPeriods, settledAmount, nextRebateDate, rebateSettledPeriods } = e;
+  if (!rebateStartDate || !rebateQty) return [];
+  const stepMonths = REBATE_STEP_MONTHS[rebateCycle] || 0;
+  // 已确认期次来自 rebateSettledPeriods（数组）；老数据回退按 settledAmount 视为 1..N（与 PC 一致）
+  const settledSeqs: number[] = Array.isArray(rebateSettledPeriods)
+    ? rebateSettledPeriods.map(Number).filter((n: number) => n >= 1)
+    : ((Math.round(Number(settledAmount) || 0) > 0)
+        ? Array.from({ length: Math.round(Number(settledAmount) || 0) }, (_: any, i: number) => i + 1)
+        : []);
+  // 每期对应一笔 is_rebate=1 且非冲正的结算（取最新一笔），用于回显备注与凭证
+  const settleBySeq = new Map<number, any>();
+  (settlements || []).forEach((s: any) => {
+    if (!s.isRebate || s.isReversal) return;
+    const seq = Number(s.rebateSeq) || 0;
+    if (!seq) return;
+    settleBySeq.set(seq, s);
+  });
+  const total = Number(rebateTotalPeriods) || 0;
+  // 固定周期：生成全部期次；不限期数（长期有效）：展示 已收 + 全部逾期 + 下一期待结，
+  // 即向后推到包含首个未到期（待结）期为止；自定义周期不推断未来日期，仅保留已收+下一期。
+  let count: number;
+  if (total > 0) {
+    count = total;
+  } else {
+    const maxSettled = settledSeqs.length ? Math.max.apply(null, settledSeqs) : 0;
+    count = maxSettled + 1;
+    if (stepMonths > 0) {
+      const today = todayStr();
+      for (let guard = 0; guard < 200; guard++) {
+        const idx = count - 1;
+        const d = addMonths(rebateStartDate, idx * stepMonths);
+        if (d && d < today) count++; else break;
+      }
+    }
+  }
+  const rows: RebatePeriod[] = [];
+  for (let i = 0; i < count; i++) {
+    const seq = i + 1;
+    const isSettled = settledSeqs.indexOf(seq) >= 0;
+    let planDate: string;
+    if (stepMonths > 0) planDate = addMonths(rebateStartDate, i * stepMonths);
+    else if (i === 0) planDate = rebateStartDate;
+    else if (nextRebateDate) planDate = nextRebateDate;
+    else planDate = '';
+    const seqSettle = settleBySeq.get(seq);
+    rows.push({
+      seq,
+      planDate,
+      planQty: Number(rebateQty) || 0,
+      settled: isSettled,
+      remark: seqSettle?.remark || '',
+      images: (seqSettle?.images || []).map((im: any) => ({ url: im.imageUrl })),
+    });
+  }
+  return rows;
+}
+
 export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const { theme } = useTheme();
   const styles = makeStyles(theme);
@@ -62,11 +153,14 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const [keyword, setKeyword] = useState('');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('');
   const [onlyOverdue, setOnlyOverdue] = useState(false);
+  const [brandFilter, setBrandFilter] = useState('');
+  const [brandOptions, setBrandOptions] = useState<string[]>([]);
 
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ExpenseDetail | null>(null);
 
   const [settleTarget, setSettleTarget] = useState<SupplierExpense | null>(null);
+  const [settleTargetSettlements, setSettleTargetSettlements] = useState<any[]>([]); // 确认收货期次明细回显用
   const [settlePlanSeq, setSettlePlanSeq] = useState<number | null>(null); // 从详情「结算本期/补交本期」带入期次
   const [editingTarget, setEditingTarget] = useState<SupplierExpense | null>(null);
   const [editingImages, setEditingImages] = useState<string[]>([]);
@@ -77,13 +171,24 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
     if (keyword.trim()) params.keyword = keyword.trim();
     if (typeFilter) params.expenseType = Number(typeFilter);
     if (onlyOverdue) params.overdue = 1;
+    if (brandFilter) params.brand = brandFilter;
     const [s, l] = await Promise.all([
-      fetchExpenseSummary(baseUrl),
+      fetchExpenseSummary(baseUrl, params),
       fetchExpenses(baseUrl, params),
     ]);
     setSummary(s);
     setList(Array.isArray(l) ? l : []);
-  }, [baseUrl, keyword, typeFilter, onlyOverdue]);
+  }, [baseUrl, keyword, typeFilter, onlyOverdue, brandFilter]);
+
+  // 品牌筛选选项（按当前关键词/类型刷新后前端的去重品牌，轻量；后端支持精确 brand 过滤）
+  useEffect(() => {
+    (async () => {
+      try {
+        const brands = await fetchExpenseBrands(baseUrl);
+        setBrandOptions(Array.isArray(brands) ? brands : []);
+      } catch { /* 离线静默 */ }
+    })();
+  }, [baseUrl]);
 
   useEffect(() => {
     let alive = true;
@@ -131,7 +236,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const showItemActions = (e: SupplierExpense) => {
     Alert.alert(
       `${e.expenseNo}`,
-      `${e.supplierName} · ${e.expenseType === 2 ? `每期 ${e.rebateQty}${e.rebateUnit || '件'}` : money(e.totalAmount)}`,
+      `${e.supplierName} · ${e.expenseType === 2 ? `每期 ${e.rebateQty}${e.rebateUnit || '件'}` : e.expenseType === 3 ? `铺货货值 ¥${e.consignTotalValue ?? 0}` : money(e.totalAmount)}`,
       [
         { text: '编辑', onPress: () => startEdit(e) },
         { text: '删除', style: 'destructive', onPress: () => confirmDelete(e) },
@@ -161,6 +266,21 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
     ]);
   };
 
+  // 品牌汇总：基于当前筛选结果（list）本地聚合，返货单不计金额
+  const brandAgg = buildBrandAgg(list);
+  const [exporting, setExporting] = useState(false);
+  const onExportCsv = async () => {
+    if (list.length === 0) { Alert.alert('无可导出数据', '当前筛选结果为空，换个筛选条件再导出。'); return; }
+    setExporting(true);
+    try {
+      const r = await exportExpenseCsv(list);
+      Alert.alert('导出成功', `共 ${r.count} 条费用单（含品牌列）。${r.hint}`);
+    } catch (err: any) {
+      if (String(err?.message || '').startsWith('已取消')) return; // 用户主动取消，不打扰
+      Alert.alert('导出失败', err?.message || '写入文件失败，请检查手机存储空间与权限。');
+    } finally { setExporting(false); }
+  };
+
   // ============ 列表视图 ============
   if (view === 'list') {
     return (
@@ -186,6 +306,41 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
             <StatCell label="逾期" value={`${summary.overdueCount} 笔`} valueColor={theme.color.danger} />
           </View>
 
+          {/* 导出 + 品牌汇总：均吃当前筛选结果 */}
+          <View style={styles.exportRow}>
+            <Text style={styles.exportHint}>当前筛选共 {list.length} 笔</Text>
+            <TouchableOpacity style={styles.exportBtn} onPress={onExportCsv} disabled={exporting} activeOpacity={0.7}>
+              {exporting
+                ? <ActivityIndicator size="small" color={theme.color.primaryVivid} />
+                : <Text style={styles.exportBtnText}>导出 CSV</Text>}
+            </TouchableOpacity>
+          </View>
+
+          {brandAgg.length > 0 ? (
+            <View style={styles.brandCard}>
+              <Text style={styles.brandCardTitle}>品牌汇总（{brandAgg.length}）</Text>
+              <Text style={styles.brandCardSub}>按当前筛选结果统计 · 返货不计金额</Text>
+              {brandAgg.map((b, i) => (
+                <View key={b.brand} style={[styles.brandRow, i > 0 && styles.brandRowBorder]}>
+                  <View style={styles.brandRowHead}>
+                    <Text style={styles.brandName} numberOfLines={1}>{b.label}</Text>
+                    <Text style={styles.brandCount}>
+                      {b.count} 笔{b.rebateCount > 0 ? `（返货 ${b.rebateCount}）` : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.brandRowNums}>
+                    <Text style={styles.brandNumTotal}>总额 {money(b.total)}</Text>
+                    <Text style={styles.brandNumOk}>已结 {money(b.settled)}</Text>
+                    <Text style={[styles.brandNumLeft, b.unsettled > 0 && { color: theme.color.danger }]}>
+                      未结 {money(b.unsettled)}
+                    </Text>
+                    {b.overdue > 0 ? <Text style={styles.brandNumOverdue}>逾期 {b.overdue}</Text> : null}
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
           {/* 筛选 */}
           <View style={styles.filterCard}>
             <TextInput
@@ -196,7 +351,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               placeholderTextColor={theme.color.textAppTertiary}
             />
             <View style={styles.segRow}>
-              {([{ k: '', t: '全部' }, { k: '1', t: '返钱' }, { k: '2', t: '返货' }] as { k: TypeFilter; t: string }[]).map((o) => (
+              {([{ k: '', t: '全部' }, { k: '1', t: '返钱' }, { k: '2', t: '返货' }, { k: '3', t: '寄售' }] as { k: TypeFilter; t: string }[]).map((o) => (
                 <TouchableOpacity key={o.k} style={[styles.segBtn, typeFilter === o.k && styles.segBtnActive]} onPress={() => setTypeFilter(o.k)}>
                   <Text style={[styles.segBtnText, typeFilter === o.k && styles.segBtnTextActive]}>{o.t}</Text>
                 </TouchableOpacity>
@@ -206,6 +361,21 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               <Text style={styles.switchLabel}>仅看逾期</Text>
               <Switch value={onlyOverdue} onValueChange={setOnlyOverdue} thumbColor={onlyOverdue ? theme.color.primaryVivid : undefined} />
             </View>
+            {brandOptions.length > 0 ? (
+              <View style={styles.brandFilterRow}>
+                <Text style={styles.brandFilterLabel}>品牌</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.brandChipScroll}>
+                  <TouchableOpacity key="__all" style={[styles.brandChip, !brandFilter && styles.brandChipActive]} onPress={() => setBrandFilter('')}>
+                    <Text style={[styles.brandChipText, !brandFilter && styles.brandChipTextActive]}>全部</Text>
+                  </TouchableOpacity>
+                  {brandOptions.map((b) => (
+                    <TouchableOpacity key={b} style={[styles.brandChip, brandFilter === b && styles.brandChipActive]} onPress={() => setBrandFilter(brandFilter === b ? '' : b)}>
+                      <Text style={[styles.brandChipText, brandFilter === b && styles.brandChipTextActive]}>{b}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
           </View>
 
           {/* 列表 */}
@@ -217,6 +387,8 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
           ) : (
             list.map((e, i) => {
               const isRebate = e.expenseType === 2;
+              const isConsign = e.expenseType === 3;
+              const isConsignRebate = isConsign && e.returnType === 2;
               return (
                 <View key={e.id} style={[styles.itemCard, i > 0 && { marginTop: theme.spaceScale[3] }]}>
                   <TouchableOpacity style={styles.itemMain} onPress={() => openDetail(e.id)} activeOpacity={0.7}>
@@ -225,9 +397,16 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                       <TypeTag type={e.expenseType} />
                     </View>
                     <Text style={styles.itemSupplier}>{e.supplierName}</Text>
+                    {e.brand ? <Text style={styles.itemBrand}>{e.brand}</Text> : null}
                     <Text style={styles.itemItem}>{e.item || (isRebate ? (e.productName || '—') : '—')}</Text>
                     <View style={styles.itemAmountRow}>
-                      {isRebate ? (
+                      {isConsign ? (
+                        isConsignRebate ? (
+                          <Text style={styles.itemAmount}>{`返货 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
+                        ) : (
+                          <Text style={styles.itemAmount}>{money(e.totalAmount)}</Text>
+                        )
+                      ) : isRebate ? (
                         <>
                           <Text style={styles.itemAmount}>{`每期 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
                           <Text style={styles.itemUnsettled}>{`已返 ${round(e.settledAmount)} 期`}</Text>
@@ -238,19 +417,37 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                           <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
                         </>
                       )}
+                      {isConsign ? (
+                        <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
+                      ) : isRebate ? (
+                        <Text style={styles.itemUnsettled}>{`已返 ${round(e.settledAmount)} 期`}</Text>
+                      ) : (
+                        <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
+                      )}
                     </View>
+                    {isConsign ? (
+                      (() => {
+                        const items = Array.isArray(e.consignItems) ? e.consignItems : [];
+                        const nQty = items.filter((i) => i.type !== 'gift').reduce((s, i) => s + (Number(i.qty) || 0), 0);
+                        const gQty = items.filter((i) => i.type === 'gift').reduce((s, i) => s + (Number(i.qty) || 0), 0);
+                        const base = items.length > 0 ? { nQty, gQty } : { nQty: Number(e.consignQty) || 0, gQty: 0 };
+                        return (
+                          <Text style={styles.itemConsignInfo}>{`铺货 ${round(base.nQty)} 件 · 搭赠 ${round(base.gQty)} 件 · 货值 ¥${e.consignTotalValue ?? 0}`}</Text>
+                        );
+                      })()
+                    ) : null}
                     <View style={styles.itemFoot}>
                       <StatusTag status={e.status} />
                       {!isRebate && Array.isArray(e.planJson) && e.planJson.length > 0 ? (
                         <Text style={styles.planListTag}>{`已 ${e.planJson.filter((p) => p.status === 1).length}/${e.planJson.length} 期`}</Text>
                       ) : null}
-                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
+                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isConsign ? (isConsignRebate ? '寄售·返货' : '寄售') : isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
                     </View>
                   </TouchableOpacity>
                   <View style={styles.itemActions}>
                     {e.status < 2 ? (
-                      <TouchableOpacity style={styles.settlePill} onPress={() => setSettleTarget(e)}>
-                        <Text style={styles.settlePillText}>{isRebate ? '确认收货' : '结算'}</Text>
+                      <TouchableOpacity style={styles.settlePill} onPress={() => { setSettleTarget(e); setSettleTargetSettlements([]); }}>
+                        <Text style={styles.settlePillText}>{isRebateLikeExpense(e) ? '确认收货' : '结算'}</Text>
                       </TouchableOpacity>
                     ) : null}
                     <TouchableOpacity style={styles.morePill} onPress={() => showItemActions(e)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -269,8 +466,9 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
           styles={styles}
           baseUrl={baseUrl}
           target={settleTarget}
+          settlements={settleTargetSettlements}
           presetPlanSeq={settlePlanSeq}
-          onClose={() => { setSettleTarget(null); setSettlePlanSeq(null); }}
+          onClose={() => { setSettleTarget(null); setSettleTargetSettlements([]); setSettlePlanSeq(null); }}
           onConfirm={async (payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }) => {
             try {
               await settleExpense(baseUrl, settleTarget!.id, payload);
@@ -310,7 +508,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
         ) : (
           <DetailBody
             theme={theme} styles={styles} baseUrl={baseUrl} detail={detail}
-            onSettle={() => setSettleTarget(detail.expense)}
+            onSettle={() => { setSettleTarget(detail.expense); setSettleTargetSettlements(detail.settlements || []); }}
             onSettlePeriod={handleSettlePeriod}
             onEdit={() => startEdit(detail.expense)}
             onDelete={() => confirmDelete(detail.expense)}
@@ -324,8 +522,9 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
         styles={styles}
         baseUrl={baseUrl}
         target={settleTarget}
+        settlements={settleTargetSettlements}
         presetPlanSeq={settlePlanSeq}
-        onClose={() => { setSettleTarget(null); setSettlePlanSeq(null); }}
+        onClose={() => { setSettleTarget(null); setSettleTargetSettlements([]); setSettlePlanSeq(null); }}
         onConfirm={async (payload: { settleAmount: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }) => {
           try {
             await settleExpense(baseUrl, settleTarget!.id, payload);
@@ -342,7 +541,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
         styles={styles}
         target={reverseTarget}
         onClose={() => setReverseTarget(null)}
-        onConfirm={async (payload: { settleAmount: number; paymentMethod?: PaymentMethod; remark?: string }) => {
+        onConfirm={async (payload: { settleAmount?: number; paymentMethod?: PaymentMethod; remark?: string }) => {
           try {
             await reverseExpense(baseUrl, reverseTarget!.id, payload);
             Alert.alert('已冲正', '已记录一笔冲正结算');
@@ -366,6 +565,115 @@ function StatCell({ label, value, valueColor }: { label: string; value: string; 
       <Text style={[styles.statValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
     </View>
   );
+}
+
+// ============ 品牌维度：汇总 + CSV 导出（与 PC 端口径一致） ============
+export interface BrandAgg {
+  brand: string;      // 聚合 key
+  label: string;      // 展示名（未填品牌的兜底成「未填品牌」）
+  count: number;      // 单数（含返货）
+  rebateCount: number;// 其中返货单数（返货不计金额，单独记）
+  total: number;      // 总额（排除返货）
+  settled: number;    // 已结
+  unsettled: number;  // 未结
+  overdue: number;    // 逾期笔数
+}
+
+const NO_BRAND = '__none__';
+
+// 返货单（expenseType=2）的 totalAmount 恒为 0、settledAmount 复用为「已收期数」，
+// 因此任何金额聚合都必须把返货排除，否则会把期数当钱加进去。
+function buildBrandAgg(list: SupplierExpense[]): BrandAgg[] {
+  const map = new Map<string, BrandAgg>();
+  (list || []).forEach((e) => {
+    const key = (e.brand || '').trim() || NO_BRAND;
+    let row = map.get(key);
+    if (!row) {
+      row = { brand: key, label: key === NO_BRAND ? '未填品牌' : key, count: 0, rebateCount: 0, total: 0, settled: 0, unsettled: 0, overdue: 0 };
+      map.set(key, row);
+    }
+    row.count += 1;
+    // 返货（expenseType=2）与寄售到期返货（expenseType=3 & returnType=2）的 totalAmount 恒为 0、
+    // settledAmount 复用为「已收期数」，因此金额聚合必须排除，否则会把期数当钱加进去；
+    // 两者都计入 rebateCount（品牌汇总「返货 N」口径统一）。
+    if (isRebateLikeExpense(e)) row.rebateCount += 1;
+    if (!isRebateLikeExpense(e)) {
+      row.total += Number(e.totalAmount) || 0;
+      row.settled += Number(e.settledAmount) || 0;
+    }
+    // 逾期笔数与 PC 一致：直接吃后端 overdue 标记（返货也有「到期未收货」的逾期，同样计入）
+    if (e.overdue) row.overdue += 1;
+  });
+  return Array.from(map.values()).map((r) => ({
+    ...r,
+    unsettled: Math.max(0, Math.round((r.total - r.settled) * 100) / 100),
+  })).sort((a, b) => (b.total - a.total) || (b.count - a.count));
+}
+
+// CSV 单元格转义：含逗号/引号/换行时加英文双引号并把内部引号翻倍
+function csvCell(v: any): string {
+  let s = v === null || v === undefined ? '' : String(v);
+  if (/[",\r\n]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+// 生成费用单 CSV 文本（含品牌列）。加 UTF-8 BOM，否则 Excel 打开中文会乱码。
+function buildExpenseCsv(list: SupplierExpense[]): string {
+  const BOM = '\uFEFF';
+  const header = ['费用单号', '供应商', '品牌', '费用项目', '费用类型', '结算方式', '发生日期', '到期日', '总金额', '已结算', '未结算', '状态'];
+  const lines = [header.map(csvCell).join(',')];
+  (list || []).forEach((e) => {
+    const isRebate = e.expenseType === 2;
+    // 寄售到期返货（expenseType=3 & returnType=2）与返货同理：totalAmount 恒为 0、settledAmount 为已收期数，按返货口径导出
+    const nonMoney = isRebate || (e.expenseType === 3 && e.returnType === 2);
+    // 返货的「未结算」= 还剩几期没确认收货；不限期数（rebateTotalPeriods=0）显示「长期」（与 PC 一致）
+    const rebateLeft = (Number(e.rebateTotalPeriods) || 0) > 0
+      ? `${Math.max(0, (Number(e.rebateTotalPeriods) || 0) - Math.round(Number(e.settledAmount) || 0))} 期`
+      : '长期';
+    const unsettled = isRebate ? '' : Math.max(0, (Number(e.totalAmount) || 0) - (Number(e.settledAmount) || 0)).toFixed(2);
+    lines.push([
+      e.expenseNo,
+      e.supplierName,
+      e.brand || '',
+      e.item || '',
+      EXPENSE_TYPE_LABEL[e.expenseType] || '',
+      // 结算方式：返货 / 寄售到期返货填「返货」（与 PC 导出列口径一致，避免两份表合并后同一列语义不同）
+      nonMoney ? '返货' : (SETTLE_METHOD_LABEL[e.settleMethod] || ''),
+      e.expenseDate || '',
+      nonMoney ? (e.nextRebateDate || '') : (e.dueDate || ''),
+      nonMoney ? '' : (Number(e.totalAmount) || 0).toFixed(2),
+      nonMoney ? `${Math.round(Number(e.settledAmount) || 0)} 期` : (Number(e.settledAmount) || 0).toFixed(2),
+      nonMoney ? rebateLeft : unsettled,
+      statusLabel(e.status),
+    ].map(csvCell).join(','));
+  });
+  return BOM + lines.join('\r\n');
+}
+
+// 导出费用单 CSV。分平台走不同通道，但都不新增第三方依赖：
+//  · Android：RN 自带的 Share 在 Android 上根本不认 url（ShareModule 只把 title 塞 EXTRA_SUBJECT、
+//    message 塞 EXTRA_TEXT，type 还是 text/plain），分享文件只会发出空内容。
+//    所以走系统文件选择器（StorageAccessFramework，无需存储权限）让用户选目录保存。
+//  · iOS：Share 支持 url，写缓存后调系统分享面板（微信/邮件/存储到文件由用户选）。
+async function exportExpenseCsv(list: SupplierExpense[]): Promise<{ count: number; hint: string }> {
+  if (!list || list.length === 0) throw new Error('当前筛选结果为空，无可导出数据');
+  const csv = buildExpenseCsv(list);
+  const name = `供应商陈列费用-${todayStr()}.csv`;
+
+  if (Platform.OS === 'android' && FileSystem.StorageAccessFramework) {
+    const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+    if (!perms?.granted || !perms.directoryUri) throw new Error('已取消：未选择保存位置');
+    const uri = await FileSystem.StorageAccessFramework.createFileAsync(perms.directoryUri, name, 'text/csv');
+    await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+    return { count: list.length, hint: `已保存为 ${name}，在「文件管理 / 下载」中可查看` };
+  }
+
+  const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+  if (!dir) throw new Error('当前设备不支持文件写入');
+  const uri = `${dir}${name}`;
+  await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+  await Share.share({ url: uri, title: name }, { dialogTitle: '导出陈列费用 CSV' });
+  return { count: list.length, hint: '请在系统分享面板中选择保存位置或发送给他人' };
 }
 
 // ============ 类型 / 状态 Tag ============
@@ -394,6 +702,8 @@ function StatusTag({ status }: { status: ExpenseStatus }) {
 function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, onEdit, onDelete, onReverse }: any) {
   const e = detail.expense;
   const isRebate = e.expenseType === 2;
+  const isConsign = e.expenseType === 3;
+  const isRebateLike = isRebateLikeExpense(e);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const planList: PlanPeriod[] = Array.isArray(e.planJson) ? e.planJson : [];
   return (
@@ -492,11 +802,39 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         <InfoRow label="供应商" value={e.supplierName} />
         <InfoRow label="类型" value={EXPENSE_TYPE_LABEL[e.expenseType as ExpenseType]} />
         <InfoRow label="项目" value={e.item || '—'} />
-        <InfoRow label="结算方式" value={isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
+        {e.brand ? <InfoRow label="品牌" value={e.brand} /> : null}
+        <InfoRow label="结算方式" value={isRebateLike ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
         <InfoRow label="发生日期" value={e.expenseDate} />
         {!isRebate && e.settleMethod !== 3 ? <InfoRow label="到期日" value={e.dueDate || '—'} /> : null}
         {e.remark ? <InfoRow label="备注" value={e.remark} /> : null}
       </View>
+
+      {/* 寄售协议（expenseType=3） */}
+      {isConsign ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>寄售协议</Text>
+          <InfoRow label="铺货商品" value={e.productName || '—'} />
+          <InfoRow label="铺货数量" value={`${round(e.consignQty)}${e.consignUnit || '件'}`} />
+          <InfoRow label="已售数量" value={`${round(e.soldQty)}${e.consignUnit || '件'}`} />
+          <InfoRow label="应还数量" value={`${round(e.consignRemainQty)}${e.consignUnit || '件'}`} />
+          <InfoRow label="铺货总货值（进货价合计）" value={`¥${money(e.consignTotalValue)}`} />
+          <InfoRow label="已售货值（零售价）" value={`¥${money((Number(e.soldQty) || 0) * (Number(e.consignSalePrice) || 0))}`} />
+          <InfoRow label="应还货值（零售价）" value={`¥${money((Number(e.consignRemainQty) || 0) * (Number(e.consignSalePrice) || 0))}`} />
+          <InfoRow label="铺货到期日" value={e.maturityDate || '—'} />
+          <InfoRow label="到期返还形式" value={e.returnType === 2 ? '到期返货' : '到期返钱'} />
+          {Array.isArray(e.consignItems) && e.consignItems.length > 0 ? (
+            <View style={styles.consignItemList}>
+              <Text style={styles.subTitle}>铺货商品明细</Text>
+              {e.consignItems.map((it: ConsignItem, i: number) => (
+                <View key={i} style={styles.consignItemRow}>
+                  <Text style={styles.consignItemName}>{it.name}{it.type === 'gift' ? ' [搭赠]' : ''}</Text>
+                  <Text style={styles.consignItemMeta}>{`${round(it.qty)}${it.unit || '件'}${it.type === 'gift' ? '' : ` · 进${money(it.costPrice)}/零${money(it.salePrice)}`}`}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* 返货协议（expenseType=2） */}
       {isRebate ? (
@@ -511,6 +849,43 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         </View>
       ) : null}
 
+      {/* 返货期次明细（与 PC 详情一致：每期备注 + 凭证图片，按 rebate_seq 关联） */}
+      {isRebate ? (
+        (() => {
+          const periods = buildRebatePeriods(e, detail.settlements || []);
+          return (
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>{`返货期次明细（已收 ${periods.filter((p) => p.settled).length} / 共 ${periods.length} 期）`}</Text>
+              {periods.map((p, idx) => {
+                const imgs = (p.images || []).filter((im: any) => im && im.url);
+                return (
+                  <View key={p.seq} style={{ borderTopWidth: idx === 0 ? 0 : 1, borderTopColor: theme.color.dividerApp, paddingVertical: 8 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontWeight: theme.font.weight.semibold, color: theme.color.textApp }}>{`第 ${p.seq} 期 · ${p.planDate || '—'}`}</Text>
+                      <Text style={{ fontSize: 12, color: p.settled ? theme.color.success : (p.planDate && p.planDate < todayStr() ? theme.color.danger : theme.color.textAppTertiary) }}>{p.settled ? `已收 ${p.planQty}${e.rebateUnit || ''}` : (p.planDate && p.planDate < todayStr() ? '逾期' : '待收')}</Text>
+                    </View>
+                    {p.remark ? <Text style={[styles.planRemark, { marginTop: 2 }]}>{`备注：${p.remark}`}</Text> : null}
+                    {imgs.length > 0 ? (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 6 }}>
+                        {imgs.map((im: any, k: number) => (
+                          (im.url || '').toLowerCase().endsWith('.pdf') ? (
+                            <Text key={k} style={styles.planNoVoucher}>📄 PDF凭证 </Text>
+                          ) : (
+                            <TouchableOpacity key={k} onPress={() => setPreviewUri(toAbsoluteUrl(baseUrl, im.url))} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+                              <Image source={{ uri: toAbsoluteUrl(baseUrl, im.url) }} style={{ width: 44, height: 44, borderRadius: 6, marginRight: 6, borderWidth: 1, borderColor: theme.color.dividerApp }} />
+                            </TouchableOpacity>
+                          )
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          );
+        })()
+      ) : null}
+
       {/* 结算历史 */}
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>结算历史（{detail.settlements.length}）</Text>
@@ -520,7 +895,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
           <View key={s.id} style={[styles.settleRow, i > 0 && { borderTopWidth: 1, borderTopColor: theme.color.dividerApp }]}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.settleAmt, (s.isReversal || s.isRebate) && { color: s.isRebate ? theme.color.primaryVivid : theme.color.danger }]}>
-                {s.isRebate ? `返货确认收货${s.rebatePeriod ? `（${s.rebatePeriod}）` : ''} ` : (s.isReversal ? '冲正 ' : '')}{money(s.settleAmount)}
+                {s.isReversal ? `冲正${s.rebatePeriod ? `（${s.rebatePeriod}）` : ''} ` : s.isRebate ? `返货确认收货${s.rebatePeriod ? `（${s.rebatePeriod}）` : ''} ` : ''}{money(s.settleAmount)}
               </Text>
               <Text style={styles.settleMeta}>{s.isRebate ? '返货抵费' : `${PAYMENT_LABEL[s.paymentMethod as PaymentMethod]} · ${s.settleDate}`}{s.operator ? ` · ${s.operator}` : ''}</Text>
               {s.remark ? <Text style={styles.settleMeta}>{s.remark}</Text> : null}
@@ -559,7 +934,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         <TouchableOpacity style={[styles.actionBtn, styles.actionBtnDanger]} onPress={onDelete}>
           <Text style={[styles.actionBtnText, { color: theme.color.danger }]}>删除</Text>
         </TouchableOpacity>
-        {!isRebate && e.settledAmount > 0 ? (
+        {((!isRebateLike && e.settledAmount > 0) || (isRebateLike && (e.rebateSettledPeriods?.length || 0) > 0)) ? (
           <TouchableOpacity style={[styles.actionBtn, styles.actionBtnWarning]} onPress={onReverse}>
             <Text style={[styles.actionBtnText, { color: theme.color.warning }]}>冲正</Text>
           </TouchableOpacity>
@@ -568,7 +943,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
 
       {e.status < 2 ? (
         <TouchableOpacity style={styles.settleActionBtn} onPress={onSettle}>
-          <Text style={styles.settleActionText}>{isRebate ? '确认收货' : '现场结算'}</Text>
+          <Text style={styles.settleActionText}>{isRebateLike ? '确认收货' : '现场结算'}</Text>
         </TouchableOpacity>
       ) : (
         <View style={styles.doneBanner}><Text style={styles.doneBannerText}>已结清</Text></View>
@@ -628,6 +1003,15 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [productId, setProductId] = useState<number>(e?.productId || 0);
   const [productOptions, setProductOptions] = useState<Product[]>([]);
   useEffect(() => { try { setProductOptions(listProducts()); } catch { setProductOptions([]); } }, []);
+  // 品牌联想：随供应商变化刷新（离线时静默）
+  useEffect(() => {
+    (async () => {
+      try {
+        const brands = await fetchExpenseBrands(baseUrl, supplierName.trim());
+        setBrandOptions(Array.isArray(brands) ? brands : []);
+      } catch { setBrandOptions([]); }
+    })();
+  }, [baseUrl, supplierName]);
   const filteredProducts = productOptions.filter((p) => p.name.toLowerCase().includes(productName.trim().toLowerCase())).slice(0, 6);
   const [rebateCycle, setRebateCycle] = useState<RebateCycle>(e?.rebateCycle || 1);
   const [rebateQty, setRebateQty] = useState(e && e.rebateQty ? String(e.rebateQty) : '');
@@ -635,6 +1019,26 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [maturityDate, setMaturityDate] = useState(e?.maturityDate || '');
   const [rebateTotalPeriods, setRebateTotalPeriods] = useState(e && e.rebateTotalPeriods ? String(e.rebateTotalPeriods) : '');
   const [remark, setRemark] = useState(e?.remark || '');
+  // 寄售铺货（expenseType=3）：多行商品明细（含正常/搭赠）；后端从明细派生 productId/productName/consignUnit/consignQty/consignCostPrice/consignSalePrice
+  const blankConsignItem = (): ConsignItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0, costPrice: 0, salePrice: 0, type: 'normal' });
+  const [consignItems, setConsignItems] = useState<ConsignItem[]>(
+    Array.isArray(e?.consignItems) && e!.consignItems.length > 0
+      ? e!.consignItems.map((it: ConsignItem) => ({ ...it }))
+      : [blankConsignItem()]
+  );
+  const [soldQty, setSoldQty] = useState(e && e.soldQty ? String(e.soldQty) : '0');
+  const [consignMaturity, setConsignMaturity] = useState(e?.maturityDate || '');
+  const [returnType, setReturnType] = useState<number>(e?.returnType || 1);
+  // 铺货总数量（含搭赠）= 所有行 qty 合计；铺货总价值 = 仅正常行 Σ(数量 × 进货价)（本地派生展示）
+  const consignTotalQty = consignItems.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  const consignTotalValue = consignItems.reduce((s, it) => s + ((it.type === 'gift' ? 0 : (Number(it.qty) || 0) * (Number(it.costPrice) || 0))), 0);
+  const updateConsignItem = (idx: number, patch: Partial<ConsignItem>) =>
+    setConsignItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const removeConsignItem = (idx: number) =>
+    setConsignItems((prev) => prev.filter((_, i) => i !== idx));
+  // 品牌（按供应商区分费用，自由文本 + 历史联想）
+  const [brand, setBrand] = useState(e?.brand || '');
+  const [brandOptions, setBrandOptions] = useState<string[]>([]);
   const [images, setImages] = useState<string[]>(editingImages || []);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -687,18 +1091,61 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     }
   };
 
+  // 切换费用类型时清掉不相关字段，避免提交脏数据（如寄售字段混进返钱单）
+  const setExpenseTypeSafe = (k: ExpenseType) => {
+    if (k === expenseType) return;
+    setExpenseType(k);
+    setProductName(''); setProductId(0);
+    setConsignItems([blankConsignItem()]); setSoldQty('0'); setConsignMaturity(''); setReturnType(1);
+    setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
+    setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
+  };
+
   const submit = async () => {
     if (!supplierName.trim()) { onError('供应商必填'); return; }
     if (!expenseDate.trim()) { onError('请填写发生日期（yyyy-mm-dd）'); return; }
     const payload: any = {
       supplierName: supplierName.trim(),
+      brand: brand.trim(),
       expenseType,
       item: item.trim(),
       expenseDate: expenseDate.trim().slice(0, 10),
       remark: remark.trim(),
       images: images.map((u) => ({ imageUrl: u, imageId: null })),
     };
-    if (expenseType === 2) {
+    if (expenseType === 3) {
+      // 寄售铺货（两层模型）：一层=铺货商品明细(ConsignItem 多行，可含搭赠行)，二层=到期结算方式(仅返钱/返货)
+      const sq = Number(soldQty.replace(/[^0-9.]/g, '')) || 0;
+      const validItems = consignItems.filter((it) => it.name.trim());
+      if (validItems.length === 0) { onError('请至少添加一行铺货商品'); return; }
+      if (sq > consignTotalQty) { onError('已售数量不能大于铺货总数量'); return; }
+      if (!consignMaturity.trim()) { onError('请填写寄售到期日'); return; }
+      // 后端会从 consignItems 推导 productId/productName/consignUnit/consignQty/consignCostPrice/consignSalePrice/consignTotalValue
+      payload.settleMethod = 3;
+      payload.consignItems = validItems.map((it) => ({
+        ...it,
+        qty: Number(it.qty) || 0,
+        costPrice: it.type === 'gift' ? 0 : (Number(it.costPrice) || 0),
+        salePrice: it.type === 'gift' ? 0 : (Number(it.salePrice) || 0),
+      }));
+      payload.soldQty = sq;
+      payload.maturityDate = consignMaturity.trim().slice(0, 10);
+      payload.returnType = returnType;
+      if (returnType === 1) {
+        // 到期返钱：走普通金额结算（陈列费）
+        const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+        if (a <= 0) { onError('陈列费金额需大于 0'); return; }
+        payload.totalAmount = a;
+      } else if (returnType === 2) {
+        // 到期返货：复用返货那套，totalAmount=0、记到期应返数量、固定 1 期
+        const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
+        if (rq <= 0) { onError('到期应返数量需大于 0'); return; }
+        payload.totalAmount = 0;
+        payload.rebateQty = rq;
+        payload.rebateUnit = validItems[0]?.unit?.trim() || '件';
+        payload.rebateTotalPeriods = 1;
+      }
+    } else if (expenseType === 2) {
       // 返货：关联商品（可手填，无匹配则 productId=0）、无单价、不折算金额
       const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
       if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
@@ -846,11 +1293,31 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           <Text style={styles.pickerArrow}>›</Text>
         </TouchableOpacity>
 
+        {/* 品牌（可选）：同一供应商旗下多个品牌（如怡宝、农夫），填品牌可把费用归到具体品牌，避免混在一起 */}
+        <Text style={styles.fieldLabel}>品牌（可选）</Text>
+        <TextInput
+          style={styles.input} value={brand} onChangeText={setBrand}
+          placeholder="选历史品牌或手填，如 怡宝 / 农夫" placeholderTextColor={theme.color.textAppTertiary}
+        />
+        {brandOptions.length > 0 ? (
+          <View style={styles.chipRow}>
+            {brandOptions.map((b) => (
+              <TouchableOpacity
+                key={b}
+                style={[styles.chip, brand === b && styles.chipActive]}
+                onPress={() => setBrand(brand === b ? '' : b)}
+              >
+                <Text style={[styles.chipText, brand === b && styles.chipTextActive]}>{b}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
         {/* 费用类型 */}
         <Text style={styles.fieldLabel}>费用类型</Text>
         <View style={styles.segRow}>
-          {([{ k: 1, t: '返钱' }, { k: 2, t: '返货' }] as { k: ExpenseType; t: string }[]).map((o) => (
-            <TouchableOpacity key={o.k} style={[styles.segBtn, expenseType === o.k && styles.segBtnActive]} onPress={() => setExpenseType(o.k)}>
+          {([{ k: 1, t: '返钱' }, { k: 2, t: '返货' }, { k: 3, t: '寄售铺货' }] as { k: ExpenseType; t: string }[]).map((o) => (
+            <TouchableOpacity key={o.k} style={[styles.segBtn, expenseType === o.k && styles.segBtnActive]} onPress={() => setExpenseTypeSafe(o.k)}>
               <Text style={[styles.segBtnText, expenseType === o.k && styles.segBtnTextActive]}>{o.t}</Text>
             </TouchableOpacity>
           ))}
@@ -881,7 +1348,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 {settleMethod !== 3 ? (
                   <View>
                     <Text style={styles.fieldLabel}>到期日（年结/月结/季度结）</Text>
-                    <TextInput style={styles.input} value={dueDate} onChangeText={setDueDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+                    <DatePickerField value={dueDate} onChange={setDueDate} title="到期日" />
                   </View>
                 ) : null}
                 <Text style={styles.fieldLabel}>费用金额（元）*</Text>
@@ -955,12 +1422,11 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                       {...numInput((v) => updatePlanRow(p.seq, { planAmount: v }))}
                       placeholder="金额" placeholderTextColor={theme.color.textAppTertiary}
                     />
-                    <TextInput
-                      style={[styles.input, styles.planEditDate]}
-                      value={p.planDate}
-                      onChangeText={(v) => updatePlanRow(p.seq, { planDate: v })}
+                    <DatePickerField
+                      value={p.planDate || ''}
+                      onChange={(v) => updatePlanRow(p.seq, { planDate: v })}
                       placeholder="yyyy-mm-dd"
-                      placeholderTextColor={theme.color.textAppTertiary}
+                      title={`第${p.seq}期日期`}
                     />
                     <TextInput
                       style={[styles.input, styles.planEditRemark]}
@@ -984,7 +1450,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
               </>
             )}
           </View>
-        ) : (
+        ) : expenseType === 2 ? (
           /* 返货：关联商品 + 周期返还实物，无单价/金额 */
           <View>
             <Text style={styles.fieldLabel}>关联商品 *（可手填/可搜索选择）</Text>
@@ -1033,14 +1499,143 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
             <View style={styles.dualRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.fieldLabel}>首期日期</Text>
-                <TextInput style={styles.input} value={rebateStartDate} onChangeText={setRebateStartDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+                <DatePickerField value={rebateStartDate} onChange={setRebateStartDate} title="首期日期" />
               </View>
               <View style={{ width: 12 }} />
               <View style={{ flex: 1 }}>
                 <Text style={styles.fieldLabel}>到期时间（空=长期）</Text>
-                <TextInput style={styles.input} value={maturityDate} onChangeText={setMaturityDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+                <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（空=长期）" allowEmpty />
               </View>
             </View>
+          </View>
+        ) : (
+          /* 寄售铺货（两层模型）：一层=铺货商品明细(多行 ConsignItem，含正常/搭赠)，二层=到期结算方式(仅返钱/返货) */
+          <View>
+            <Text style={styles.fieldLabel}>铺货商品明细 *（每行一件，可手填品名；搭赠行不计货值）</Text>
+
+            {consignItems.map((it, idx) => (
+              <View key={idx} style={styles.consignItemCard}>
+                <View style={styles.consignItemHead}>
+                  <Text style={styles.consignItemTitle}>{`商品 ${idx + 1}${it.type === 'gift' ? ' · 搭赠' : ''}`}</Text>
+                  <TouchableOpacity onPress={() => removeConsignItem(idx)}>
+                    <Text style={styles.consignItemDel}>删除</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.fieldLabel}>品名 *</Text>
+                <TextInput
+                  style={styles.input}
+                  value={it.name}
+                  onChangeText={(v) => updateConsignItem(idx, { name: v, productId: 0 })}
+                  placeholder="如：可乐 330ml"
+                  placeholderTextColor={theme.color.textAppTertiary}
+                />
+
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>数量 *</Text>
+                    <TextInput style={styles.input} value={String(it.qty)} {...numInput((v) => updateConsignItem(idx, { qty: Number(v) || 0 }))} placeholder="如 100" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>单位</Text>
+                    <TextInput style={styles.input} value={it.unit} onChangeText={(v) => updateConsignItem(idx, { unit: v })} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                </View>
+
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>规格</Text>
+                    <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateConsignItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>类型</Text>
+                    <View style={styles.segRow}>
+                      <TouchableOpacity style={[styles.segBtn, it.type !== 'gift' && styles.segBtnActive]} onPress={() => updateConsignItem(idx, { type: 'normal' })}>
+                        <Text style={[styles.segBtnText, it.type !== 'gift' && styles.segBtnTextActive]}>正常</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.segBtn, it.type === 'gift' && styles.segBtnActive]} onPress={() => updateConsignItem(idx, { type: 'gift' })}>
+                        <Text style={[styles.segBtnText, it.type === 'gift' && styles.segBtnTextActive]}>搭赠</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>{`进货价（元/${it.unit || '件'}）`}</Text>
+                    <TextInput
+                      style={[styles.input, it.type === 'gift' && styles.inputDisabled]}
+                      value={it.type === 'gift' ? '0.00' : String(it.costPrice)}
+                      editable={it.type !== 'gift'}
+                      {...numInput((v) => updateConsignItem(idx, { costPrice: Number(v) || 0 }))}
+                      placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary}
+                    />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>{`零售价（元/${it.unit || '件'}）`}</Text>
+                    <TextInput
+                      style={[styles.input, it.type === 'gift' && styles.inputDisabled]}
+                      value={it.type === 'gift' ? '0.00' : String(it.salePrice)}
+                      editable={it.type !== 'gift'}
+                      {...numInput((v) => updateConsignItem(idx, { salePrice: Number(v) || 0 }))}
+                      placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary}
+                    />
+                  </View>
+                </View>
+              </View>
+            ))}
+
+            <TouchableOpacity style={styles.addItemBtn} onPress={() => setConsignItems((prev) => [...prev, blankConsignItem()])}>
+              <Text style={styles.addItemBtnText}>＋ 添加商品</Text>
+            </TouchableOpacity>
+
+            <View style={styles.summaryBox}>
+              <Text style={styles.summaryText}>{`铺货总数量 ${consignTotalQty} 件 · 铺货总价值 ¥${round(consignTotalValue)}`}</Text>
+            </View>
+
+            <View style={styles.dualRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>已售数量</Text>
+                <TextInput style={styles.input} value={soldQty} {...numInput(setSoldQty)} placeholder="0" placeholderTextColor={theme.color.textAppTertiary} />
+              </View>
+              <View style={{ width: 12 }} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>应还数量</Text>
+                <View style={[styles.input, styles.consignRemainBox]}>
+                  <Text style={styles.consignRemainText}>{`${Math.max(0, consignTotalQty - (Number(soldQty.replace(/[^0-9.]/g, '')) || 0))}`}</Text>
+                </View>
+              </View>
+            </View>
+            <Text style={[styles.hint, { marginTop: 4 }]}>到期需归还给供应商</Text>
+
+            <Text style={styles.fieldLabel}>寄售到期日 *</Text>
+            <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
+
+            <Text style={styles.fieldLabel}>到期返还形式</Text>
+            <View style={styles.segRow}>
+              <TouchableOpacity style={[styles.segBtn, returnType === 1 && styles.segBtnActive]} onPress={() => setReturnType(1)}>
+                <Text style={[styles.segBtnText, returnType === 1 && styles.segBtnTextActive]}>到期返钱</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.segBtn, returnType === 2 && styles.segBtnActive]} onPress={() => setReturnType(2)}>
+                <Text style={[styles.segBtnText, returnType === 2 && styles.segBtnTextActive]}>到期返货</Text>
+              </TouchableOpacity>
+            </View>
+
+            {returnType === 1 ? (
+              <>
+                <Text style={styles.fieldLabel}>陈列费金额（元）*</Text>
+                <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+              </>
+            ) : (
+              <>
+                <Text style={styles.fieldLabel}>{`到期应返数量（${consignItems[0]?.unit?.trim() || '件'}）*`}</Text>
+                <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="如 30" placeholderTextColor={theme.color.textAppTertiary} />
+                <Text style={[styles.hint, { marginTop: 4 }]}>{`单位跟随铺货明细单位（${consignItems[0]?.unit?.trim() || '件'}）`}</Text>
+              </>
+            )}
           </View>
         )}
 
@@ -1050,7 +1645,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 
         {/* 发生日期 */}
         <Text style={styles.fieldLabel}>发生日期 *</Text>
-        <TextInput style={styles.input} value={expenseDate} onChangeText={setExpenseDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+        <DatePickerField value={expenseDate} onChange={setExpenseDate} title="发生日期" />
 
         {/* 备注 */}
         <Text style={styles.fieldLabel}>备注</Text>
@@ -1113,7 +1708,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 }
 
 // ============ 现场结算 Modal ============
-function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, onConfirm }: any) {
+function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSeq, onClose, onConfirm }: any) {
   const [amount, setAmount] = useState('');
   const [payment, setPayment] = useState<PaymentMethod>(1);
   const [settleDate, setSettleDate] = useState(todayStr());
@@ -1143,14 +1738,21 @@ function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, o
       const sel = plans.find((p) => p.seq === defSeq);
       if (sel) setAmount(amountForPeriod(sel));
       else setAmount(target.unsettledAmount ? target.unsettledAmount.toFixed(2) : '');
-      setPayment(target.expenseType === 2 ? 3 : 1);
+      setPayment(isRebateLikeExpense(target) ? 3 : 1);
       setSettleDate(todayStr());
       setRemark('');
       setSettleImages([]);
     }
   }, [target, presetPlanSeq]);
 
-  const isRebate = target?.expenseType === 2;
+  const isRebate = isRebateLikeExpense(target);
+  const rebatePeriods = isRebate ? buildRebatePeriods(target, settlements || []) : [];
+  const rebateSettled = rebatePeriods.filter((p) => p.settled).length;
+  // 返货确认收货：允许像返钱那样「指定某个月」——默认选中当前待收期（已收+1），可改选其它未收期
+  const rebateCurrentSeq = rebatePeriods.find((p) => !p.settled)?.seq ?? null;
+  const rebateEffSeq = planSeq != null ? planSeq : rebateCurrentSeq;
+  const rebateSelPeriod = rebatePeriods.find((p) => p.seq === rebateEffSeq) || null;
+  const rebateSelOverdue = !!(rebateSelPeriod && !rebateSelPeriod.settled && rebateSelPeriod.planDate && rebateSelPeriod.planDate < todayStr());
 
   const openCamera = async () => {
     if (!permission?.granted) {
@@ -1232,21 +1834,89 @@ function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, o
             <ScrollView style={styles.body} contentContainerStyle={styles.content}>
               {isRebate ? (
                 <>
-                  <Text style={styles.hint}>{target.supplierName} · 本期返货确认收货</Text>
+                  <Text style={styles.hint}>{target.supplierName} · 选择期次后确认收货</Text>
+                  <View style={styles.card}>
+                    <Text style={styles.sectionTitle}>返货期次（已收 {rebateSettled} / 共 {rebatePeriods.length} 期）</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                      {rebatePeriods.map((p, i) => {
+                        const isCurrent = !p.settled && i === rebateSettled;
+                        const isOverdue = !p.settled && p.planDate && p.planDate < todayStr();
+                        const selected = p.seq === rebateEffSeq;
+                        const pillColor = p.settled ? theme.color.success : isOverdue ? theme.color.danger : isCurrent ? theme.color.primaryVivid : theme.color.textAppTertiary;
+                        const pillText = p.settled ? '已结' : isOverdue ? '逾期' : '待结';
+                        const borderColor = selected ? theme.color.primaryVivid : pillColor;
+                        const bg = selected ? theme.color.primarySoft : pillColor + '0D';
+                        return (
+                          <TouchableOpacity key={p.seq} style={{ width: '25%', padding: 4 }} activeOpacity={0.7}
+                            onPress={() => {
+                              if (p.settled) { Alert.alert(`第${p.seq}期`, '该期已确认收货，无需重复操作'); return; }
+                              setPlanSeq(p.seq);
+                            }}>
+                            <View style={{ borderWidth: selected ? 2 : 1, borderColor, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 4, alignItems: 'center', backgroundColor: bg }}>
+                              <Text style={{ fontSize: 12, fontWeight: theme.font.weight.semibold, color: pillColor }}>第{p.seq}期{selected ? '（选）' : ''}</Text>
+                              <Text style={{ fontSize: 11, color: theme.color.textAppSecondary, marginTop: 2 }}>{p.planDate ? p.planDate.slice(0, 7) : '—'}</Text>
+                              <Text style={{ fontSize: 11, color: theme.color.textAppSecondary, marginTop: 2 }}>应返 {p.planQty}{target.rebateUnit || ''}</Text>
+                              <View style={{ marginTop: 4, backgroundColor: pillColor, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1 }}>
+                                <Text style={{ fontSize: 10, color: '#fff' }}>{pillText}</Text>
+                              </View>
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                  {/* 已收期次明细：每期备注 + 凭证（与 PC 详情一致，按 rebate_seq 关联） */}
+                  {rebatePeriods.some((p) => p.settled) ? (
+                    <View style={styles.card}>
+                      <Text style={styles.sectionTitle}>已收期次明细</Text>
+                      {rebatePeriods.filter((p) => p.settled).map((p, idx) => {
+                        const imgs = (p.images || []).filter((im: any) => im && im.url);
+                        return (
+                          <View key={p.seq} style={{ borderTopWidth: idx === 0 ? 0 : 1, borderTopColor: theme.color.dividerApp, paddingVertical: 8 }}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <Text style={{ fontWeight: theme.font.weight.semibold, color: theme.color.textApp }}>{`第 ${p.seq} 期 · ${p.planDate || '—'}`}</Text>
+                              <Text style={{ fontSize: 12, color: theme.color.success }}>已收 {p.planQty}{target.rebateUnit || ''}</Text>
+                            </View>
+                            {p.remark ? <Text style={[styles.planRemark, { marginTop: 2 }]}>{`备注：${p.remark}`}</Text> : null}
+                            {imgs.length > 0 ? (
+                              <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 6 }}>
+                                {imgs.map((im: any, k: number) => (
+                                  (im.url || '').toLowerCase().endsWith('.pdf') ? (
+                                    <Text key={k} style={styles.planNoVoucher}>📄 PDF凭证 </Text>
+                                  ) : (
+                                    <TouchableOpacity key={k} onPress={() => setPreviewUri(toAbsoluteUrl(baseUrl, im.url))} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+                                      <Image source={{ uri: toAbsoluteUrl(baseUrl, im.url) }} style={{ width: 44, height: 44, borderRadius: 6, marginRight: 6, borderWidth: 1, borderColor: theme.color.dividerApp }} />
+                                    </TouchableOpacity>
+                                  )
+                                ))}
+                              </View>
+                            ) : null}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+                  {rebateSelOverdue ? (
+                    <Text style={[styles.hint, { color: theme.color.danger, marginTop: 4 }]}>⚠ 所选期次已逾期，本次确认将记为补收</Text>
+                  ) : null}
                   <View style={styles.card}>
                     <InfoRow label="关联商品" value={`${target.productName || '—'}`} />
                     <InfoRow label="每期" value={`${round(target.rebateQty)}${target.rebateUnit || '件'}`} />
-                    <InfoRow label="本期（下次）" value={target.nextRebateDate || '—'} />
-                    <InfoRow label="说明" value="确认后记为「返货确认收货」并自动推进下一期" />
+                    <InfoRow label="本期（下次）" value={rebateSelPeriod?.planDate || target.nextRebateDate || '—'} />
+                    <InfoRow label="说明" value={Number(target?.rebateTotalPeriods) === 1 ? '确认后本期结清，无需再推进' : '确认后记为「返货确认收货」并自动推进下一期'} />
                   </View>
+                  <Text style={styles.fieldLabel}>收货日期 *</Text>
+                  <DatePickerField value={settleDate} onChange={setSettleDate} title="收货日期" />
                   <Text style={styles.fieldLabel}>备注</Text>
                   <TextInput style={styles.input} value={remark} onChangeText={setRemark} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
                   {renderSettleImages()}
                   <TouchableOpacity style={styles.saveBtn} onPress={() => {
-                    const nextDate = target.nextRebateDate || '';
-                    const msg = nextDate
-                      ? `确认本期返货收货？\n本期对应日期：${nextDate}，确认后将自动推进下一期。`
-                      : '确认本期返货收货？确认后将自动推进下一期。';
+                    if (rebateEffSeq == null) { Alert.alert('该返货协议已全部返完'); return; }
+                    const selDate = rebateSelPeriod?.planDate || target.nextRebateDate || '';
+                    const singlePeriod = Number(target?.rebateTotalPeriods) === 1;
+                    const msg = singlePeriod
+                      ? `确认第${rebateEffSeq}期返货收货？\n对应日期：${selDate}，确认后本期结清，无需再推进。`
+                      : `确认第${rebateEffSeq}期返货收货？\n对应日期：${selDate}，确认后将登记该期返货并推进下一期。`;
                     Alert.alert('二次确认', msg, [
                       { text: '取消', style: 'cancel' },
                       { text: '确认收货', onPress: () => {
@@ -1256,6 +1926,7 @@ function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, o
                           settleDate: settleDate.trim().slice(0, 10),
                           remark: remark.trim(),
                           images: settleImages.map((u) => ({ imageUrl: u, imageId: null })),
+                          planSeq: rebateEffSeq,
                         });
                       }}
                     ]);
@@ -1272,27 +1943,32 @@ function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, o
                   {hasPlan ? (
                     <>
                       <Text style={styles.fieldLabel}>结算期次</Text>
-                      <View style={styles.chipRow}>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8 }}>
                         {planPeriods.map((p) => {
                           const od = p.status === 0 && !!p.planDate && p.planDate < todayStr();
-                          const active = planSeq === p.seq;
                           const done = p.status === 1;
+                          const active = planSeq === p.seq;
+                          const borderColor = active ? theme.color.primaryVivid : od ? theme.color.danger : theme.color.dividerApp;
+                          const bg = active ? theme.color.primarySoft : theme.color.surfaceApp;
                           return (
                             <TouchableOpacity
                               key={p.seq}
-                              style={[styles.chip, active && styles.chipActive, done && { opacity: 0.55 }]}
                               disabled={p.status !== 0}
                               onPress={() => { setPlanSeq(p.seq); setAmount(amountForPeriod(p)); }}
+                              style={{ width: '23.5%', marginRight: '2%', marginBottom: 8, borderWidth: 1, borderColor, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 6, backgroundColor: bg, opacity: done && !active ? 0.6 : 1 }}
                             >
-                              <Text style={[styles.chipText, active && styles.chipTextActive, !active && done && { color: theme.color.success }, !active && od && { color: theme.color.danger }]}>
-                                {`第${p.seq}期${done ? '·已结' : od ? '·逾期' : ''}`}
-                              </Text>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                                <Text style={{ fontWeight: '600', fontSize: 12 }}>{`第${p.seq}期`}</Text>
+                                <Text style={{ fontSize: 10, color: done ? theme.color.success : od ? theme.color.danger : theme.color.warning }}>{done ? '已结' : od ? '逾期' : '待结'}</Text>
+                              </View>
+                              <Text style={{ fontSize: 11, color: theme.color.textAppTertiary }}>{p.planDate || '—'}</Text>
+                              <Text style={{ fontSize: 12, marginTop: 2 }}>{`应结 ${money(Number(p.planAmount) || 0)}`}</Text>
                             </TouchableOpacity>
                           );
                         })}
                       </View>
                       {selOverdue ? (
-                        <Text style={[styles.hint, { color: theme.color.danger, marginTop: 8 }]}>⚠ 所选期次已逾期，本次结算将视为补交</Text>
+                        <Text style={[styles.hint, { color: theme.color.danger, marginTop: 4 }]}>⚠ 所选期次已逾期，本次结算将视为补交</Text>
                       ) : null}
                     </>
                   ) : null}
@@ -1310,7 +1986,7 @@ function SettleModal({ theme, styles, baseUrl, target, presetPlanSeq, onClose, o
                   </View>
 
                   <Text style={styles.fieldLabel}>结算日期 *</Text>
-                  <TextInput style={styles.input} value={settleDate} onChangeText={setSettleDate} placeholder="yyyy-mm-dd" placeholderTextColor={theme.color.textAppTertiary} />
+                  <DatePickerField value={settleDate} onChange={setSettleDate} title="结算日期" />
 
                   <Text style={styles.fieldLabel}>备注</Text>
                   <TextInput style={styles.input} value={remark} onChangeText={setRemark} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
@@ -1358,6 +2034,9 @@ function ReverseModal({ theme, styles, target, onClose, onConfirm }: any) {
   const [payment, setPayment] = useState<PaymentMethod>(1);
   const [remark, setRemark] = useState('');
   const [saving, setSaving] = useState(false);
+  const isRebate = isRebateLikeExpense(target ?? { expenseType: 0 });
+  const seqs = target?.rebateSettledPeriods || [];
+  const lastSeq = isRebate && seqs.length ? Math.max(...seqs) : 0;
 
   React.useEffect(() => {
     if (target) {
@@ -1381,24 +2060,37 @@ function ReverseModal({ theme, styles, target, onClose, onConfirm }: any) {
           <TouchableOpacity style={styles.backBtn} onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={styles.backText}>取消</Text>
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>冲正结算</Text>
+          <Text style={styles.headerTitle}>{isRebate ? '冲正返货' : '冲正结算'}</Text>
           <View style={styles.subSpacer} />
         </SafeAreaHeader>
         <ScrollView style={styles.body} contentContainerStyle={styles.content}>
-          <Text style={styles.hint}>{target.supplierName} · 已结算 {money(target.settledAmount)}，冲正用于纠错并记录负数</Text>
-          <Text style={styles.fieldLabel}>冲正金额（元）*</Text>
-          <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
-          <Text style={styles.fieldLabel}>支付方式</Text>
-          <View style={styles.segRow}>
-            {([{ k: 1, t: '转账' }, { k: 2, t: '现金' }, { k: 3, t: '冲抵货款' }, { k: 4, t: '其他' }] as { k: PaymentMethod; t: string }[]).map((o) => (
-              <TouchableOpacity key={o.k} style={[styles.segBtn, payment === o.k && styles.segBtnActive]} onPress={() => setPayment(o.k)}>
-                <Text style={[styles.segBtnText, payment === o.k && styles.segBtnTextActive]}>{o.t}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {isRebate ? (
+            <Text style={styles.hint}>{target.supplierName} · 将撤销最近一次确认收货（第 {lastSeq} 期），该期回到待收、可重新确认</Text>
+          ) : (
+            <Text style={styles.hint}>{target.supplierName} · 已结算 {money(target.settledAmount)}，冲正用于纠错并记录负数</Text>
+          )}
+          {!isRebate && (
+            <>
+              <Text style={styles.fieldLabel}>冲正金额（元）*</Text>
+              <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+              <Text style={styles.fieldLabel}>支付方式</Text>
+              <View style={styles.segRow}>
+                {([{ k: 1, t: '转账' }, { k: 2, t: '现金' }, { k: 3, t: '冲抵货款' }, { k: 4, t: '其他' }] as { k: PaymentMethod; t: string }[]).map((o) => (
+                  <TouchableOpacity key={o.k} style={[styles.segBtn, payment === o.k && styles.segBtnActive]} onPress={() => setPayment(o.k)}>
+                    <Text style={[styles.segBtnText, payment === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
           <Text style={styles.fieldLabel}>备注</Text>
           <TextInput style={[styles.input, styles.textArea]} value={remark} onChangeText={setRemark} placeholder="冲正原因" placeholderTextColor={theme.color.textAppTertiary} multiline numberOfLines={3} />
           <TouchableOpacity style={[styles.saveBtn, saving && { opacity: 0.6 }]} disabled={saving} onPress={() => {
+            if (isRebate) {
+              setSaving(true);
+              void onConfirm({ remark: remark.trim() });
+              return;
+            }
             const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
             if (a <= 0) { Alert.alert('请输入冲正金额'); return; }
             setSaving(true);
@@ -1447,10 +2139,12 @@ function makeStyles(theme: any) {
     itemTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     itemNo: { fontSize: theme.font.sizeV4.bodySm, color: theme.color.textAppTertiary },
     itemSupplier: { fontSize: theme.font.sizeV4.bodyLg, fontWeight: theme.font.weight.semibold, color: theme.color.textApp, marginTop: 4 },
+    itemBrand: { fontSize: 12, color: theme.color.primaryVivid, backgroundColor: theme.color.primarySoft, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, marginTop: 4, fontWeight: theme.font.weight.medium },
     itemItem: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppSecondary, marginTop: 2 },
     itemAmountRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginTop: theme.spaceScale[2] },
     itemAmount: { fontSize: 17, fontWeight: theme.font.weight.bold, color: theme.color.textApp, fontVariant: ['tabular-nums'] },
     itemUnsettled: { fontSize: theme.font.sizeV4.caption, color: theme.color.warning },
+    itemConsignInfo: { fontSize: 12, color: theme.color.primaryVivid, backgroundColor: theme.color.primarySoft, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, marginTop: theme.spaceScale[2], fontWeight: theme.font.weight.medium },
     itemFoot: { flexDirection: 'row', alignItems: 'center', gap: theme.spaceScale[2], marginTop: theme.spaceScale[2] },
     overdueTag: { fontSize: 12, color: '#fff', backgroundColor: theme.color.danger, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, fontWeight: theme.font.weight.medium },
     methodTag: { fontSize: 12, color: theme.color.textAppTertiary },
@@ -1486,6 +2180,24 @@ function makeStyles(theme: any) {
 
     fieldLabel: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppSecondary, marginBottom: theme.spaceScale[2], marginTop: theme.spaceScale[3] },
     input: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, height: S.controlLg, paddingHorizontal: theme.spaceScale[4], color: theme.color.textApp, fontSize: theme.font.sizeV4.body },
+    consignRemainBox: { justifyContent: 'center', backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
+    consignRemainText: { color: theme.color.primaryVivid, fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.semibold },
+
+    // 寄售铺货（两层模型）：多行商品明细卡 / 添加按钮 / 汇总 / 详情行
+    consignItemCard: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[3], marginTop: theme.spaceScale[3] },
+    consignItemHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: theme.spaceScale[2] },
+    consignItemTitle: { fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },
+    consignItemDel: { fontSize: theme.font.sizeV4.caption, color: theme.color.danger, fontWeight: theme.font.weight.medium },
+    addItemBtn: { marginTop: theme.spaceScale[3], borderWidth: 1, borderStyle: 'dashed', borderColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: S.controlLg, alignItems: 'center', justifyContent: 'center' },
+    addItemBtnText: { color: theme.color.primaryVivid, fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.medium },
+    summaryBox: { marginTop: theme.spaceScale[3], backgroundColor: theme.color.primarySoft, borderRadius: theme.radius.md, paddingVertical: theme.spaceScale[3], paddingHorizontal: theme.spaceScale[4] },
+    summaryText: { color: theme.color.primaryVivid, fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.semibold },
+    inputDisabled: { color: theme.color.textAppTertiary },
+    consignItemList: { marginTop: theme.spaceScale[3], backgroundColor: theme.color.surfaceSunken, borderRadius: theme.radius.md, padding: theme.spaceScale[3] },
+    subTitle: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppSecondary, fontWeight: theme.font.weight.semibold, marginBottom: theme.spaceScale[2] },
+    consignItemRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: theme.spaceScale[2] },
+    consignItemName: { flex: 1, fontSize: theme.font.sizeV4.body, color: theme.color.textApp },
+    consignItemMeta: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginLeft: theme.spaceScale[3] },
     textArea: { height: 72, paddingTop: theme.spaceScale[3], textAlignVertical: 'top' },
     dualRow: { flexDirection: 'row' },
     pickerField: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: theme.spaceScale[4], height: S.controlLg, marginTop: theme.spaceScale[2] },
@@ -1522,9 +2234,40 @@ function makeStyles(theme: any) {
     camShutterText: { color: '#000', fontSize: 18, fontWeight: theme.font.weight.bold },
 
     chip: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: 10, paddingVertical: 6, marginRight: 8, marginBottom: 8 },
+    chipRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: theme.spaceScale[2] },
     chipActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
     chipText: { fontSize: 13, color: theme.color.textAppSecondary },
     chipTextActive: { color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
+
+    // 导出 CSV
+    exportRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: theme.spaceScale[3] },
+    exportHint: { fontSize: 12, color: theme.color.textAppTertiary },
+    exportBtn: { minWidth: 92, height: 32, paddingHorizontal: theme.spaceScale[4], borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.color.primaryVivid, alignItems: 'center', justifyContent: 'center' },
+    exportBtnText: { fontSize: 13, color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
+
+    // 品牌汇总
+    brandCard: { backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[4], marginTop: theme.spaceScale[2] },
+    brandCardTitle: { fontSize: theme.font.sizeV4.h4, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },
+    brandCardSub: { fontSize: 11, color: theme.color.textAppTertiary, marginTop: 2, marginBottom: theme.spaceScale[2] },
+    brandRow: { paddingVertical: theme.spaceScale[3] },
+    brandRowBorder: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.color.borderApp },
+    brandRowHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    brandName: { flex: 1, fontSize: 14, fontWeight: theme.font.weight.medium, color: theme.color.textApp, marginRight: theme.spaceScale[2] },
+    brandCount: { fontSize: 12, color: theme.color.textAppSecondary },
+    brandRowNums: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 6 },
+    brandNumTotal: { fontSize: 12, fontWeight: theme.font.weight.semibold, color: theme.color.textApp, marginRight: theme.spaceScale[3] },
+    brandNumOk: { fontSize: 12, color: theme.color.success, marginRight: theme.spaceScale[3] },
+    brandNumLeft: { fontSize: 12, color: theme.color.textAppSecondary, marginRight: theme.spaceScale[3] },
+    brandNumOverdue: { fontSize: 12, color: theme.color.danger },
+
+    // 品牌筛选 chips
+    brandFilterRow: { flexDirection: 'row', alignItems: 'center', marginTop: theme.spaceScale[3] },
+    brandFilterLabel: { fontSize: 12, color: theme.color.textAppTertiary, marginRight: theme.spaceScale[2] },
+    brandChipScroll: { flex: 1, flexGrow: 1 },
+    brandChip: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: 10, paddingVertical: 6, marginRight: 8 },
+    brandChipActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
+    brandChipText: { fontSize: 13, color: theme.color.textAppSecondary },
+    brandChipTextActive: { color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
 
     // 返钱分期计划
     planSummary: { fontSize: 12, color: theme.color.textAppTertiary, marginTop: -theme.spaceScale[2], marginBottom: theme.spaceScale[2] },
