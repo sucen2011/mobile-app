@@ -12,10 +12,10 @@ import DatePickerField from '../components/DatePickerField';
 import {
   fetchExpenses, getExpenseDetail, fetchExpenseSummary, createExpense, updateExpense, settleExpense,
   deleteExpense, reverseExpense, uploadExpenseImage, fetchExpenseBrands,
-  EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL,
+  EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL, SETTLEMENT_TIMING_LABEL,
   isRebateLikeExpense,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
-  type ExpenseType, type SettleMethod, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
+  type ExpenseType, type SettleMethod, type SettlementTiming, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
   type PlanPeriod, type ConsignItem,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
@@ -802,6 +802,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         <InfoRow label="供应商" value={e.supplierName} />
         <InfoRow label="类型" value={EXPENSE_TYPE_LABEL[e.expenseType as ExpenseType]} />
         <InfoRow label="项目" value={e.item || '—'} />
+        <InfoRow label="结算时机" value={SETTLEMENT_TIMING_LABEL[(e.settlementTiming || 1) as SettlementTiming]} />
         {e.brand ? <InfoRow label="品牌" value={e.brand} /> : null}
         <InfoRow label="结算方式" value={isRebateLike ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
         <InfoRow label="发生日期" value={e.expenseDate} />
@@ -986,6 +987,10 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [expenseType, setExpenseType] = useState<ExpenseType>(e?.expenseType || 1);
   const [item, setItem] = useState(e?.item || '');
   const [settleMethod, setSettleMethod] = useState<SettleMethod>(e?.settleMethod || 3);
+  // 结算时机：1=现给 2=到期给。寄售/expenseType=3 强制=2；返货默认到期给(2)；返钱默认现给(1)。与 PC 对齐。
+  const [settlementTiming, setSettlementTiming] = useState<SettlementTiming>(
+    e?.settlementTiming || (e?.expenseType === 3 ? 2 : (e?.expenseType === 2 ? 2 : 1))
+  );
   const [expenseDate, setExpenseDate] = useState(e?.expenseDate || todayStr());
   const [dueDate, setDueDate] = useState(e?.dueDate || '');
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
@@ -1095,10 +1100,18 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const setExpenseTypeSafe = (k: ExpenseType) => {
     if (k === expenseType) return;
     setExpenseType(k);
+    // 切换费用类型时复位结算时机到该类型默认值：寄售/返货→到期给(2)，返钱→现给(1)
+    setSettlementTiming(k === 3 ? 2 : (k === 2 ? 2 : 1));
     setProductName(''); setProductId(0);
     setConsignItems([blankConsignItem()]); setSoldQty('0'); setConsignMaturity(''); setReturnType(1);
     setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
     setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
+  };
+
+  // 切换结算时机：现给(1) 时强制按次、无到期日/无分期；到期给(2) 恢复默认结账周期
+  const setSettlementTimingSafe = (t: SettlementTiming) => {
+    setSettlementTiming(t);
+    if (t === 1) { setPlanMode(false); setPlanList([]); setSettleMethod(3); setDueDate(''); }
   };
 
   const submit = async () => {
@@ -1109,6 +1122,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       brand: brand.trim(),
       expenseType,
       item: item.trim(),
+      settlementTiming,
       expenseDate: expenseDate.trim().slice(0, 10),
       remark: remark.trim(),
       images: images.map((u) => ({ imageUrl: u, imageId: null })),
@@ -1158,30 +1172,40 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
     } else {
       // 返钱：金额模型 或 分期计划
-      const valid = planList.filter((p) => p.planDate && Number(p.planAmount) > 0);
-      if (planMode) {
-        // 启用分期计划：总额由计划合计推导（后端强校验），结算方式强制分期类，dueDate=末期待结
-        if (valid.length === 0) { onError('已启用分期计划，请先生成或添加有效期次（含日期与金额）'); return; }
-        payload.settleMethod = [1, 2, 5, 6].includes(settleMethod) ? settleMethod : 2;
+      if (settlementTiming === 1) {
+        // 现给：强制按次、当场一次性付清，无到期日 / 无分期计划
+        payload.settleMethod = 3;
         payload.dueDate = undefined;
-        payload.planJson = valid.map((p, i) => ({
-          seq: i + 1,
-          planDate: String(p.planDate).slice(0, 10),
-          planAmount: Number(p.planAmount) || 0,
-          remark: p.remark || '',
-          status: Number(p.status || 0),
-          settledAmount: Number(p.settledAmount || 0),
-          settledDate: p.settledDate || null,
-          images: Array.isArray(p.images) ? p.images : [],
-        }));
-      } else {
-        const sm = settleMethod;
-        payload.settleMethod = sm;
-        payload.dueDate = sm === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined);
+        payload.planJson = [];
         const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
         if (a <= 0) { onError('金额需大于 0'); return; }
         payload.totalAmount = a;
-        payload.planJson = []; // 关闭计划：清空残留
+      } else {
+        const valid = planList.filter((p) => p.planDate && Number(p.planAmount) > 0);
+        if (planMode) {
+          // 启用分期计划：总额由计划合计推导（后端强校验），结算方式强制分期类，dueDate=末期待结
+          if (valid.length === 0) { onError('已启用分期计划，请先生成或添加有效期次（含日期与金额）'); return; }
+          payload.settleMethod = [1, 2, 5, 6].includes(settleMethod) ? settleMethod : 2;
+          payload.dueDate = undefined;
+          payload.planJson = valid.map((p, i) => ({
+            seq: i + 1,
+            planDate: String(p.planDate).slice(0, 10),
+            planAmount: Number(p.planAmount) || 0,
+            remark: p.remark || '',
+            status: Number(p.status || 0),
+            settledAmount: Number(p.settledAmount || 0),
+            settledDate: p.settledDate || null,
+            images: Array.isArray(p.images) ? p.images : [],
+          }));
+        } else {
+          const sm = settleMethod;
+          payload.settleMethod = sm;
+          payload.dueDate = sm === 3 ? undefined : (dueDate.trim().slice(0, 10) || undefined);
+          const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
+          if (a <= 0) { onError('金额需大于 0'); return; }
+          payload.totalAmount = a;
+          payload.planJson = []; // 关闭计划：清空残留
+        }
       }
     }
     setSaving(true);
@@ -1310,6 +1334,19 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           </View>
         ) : null}
 
+        {/* 结算时机（上层）：现给 / 到期给 */}
+        <Text style={styles.fieldLabel}>结算时机</Text>
+        <View style={styles.segRow}>
+          {([{ k: 1, t: '现给' }, { k: 2, t: '到期给' }] as { k: SettlementTiming; t: string }[]).map((o) => (
+            <TouchableOpacity key={o.k} style={[styles.segBtn, settlementTiming === o.k && styles.segBtnActive]} onPress={() => setSettlementTimingSafe(o.k)} disabled={expenseType === 3}>
+              <Text style={[styles.segBtnText, settlementTiming === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        {expenseType === 3 ? (
+          <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>寄售铺货固定为「到期给」</Text>
+        ) : null}
+
         {/* 费用类型 */}
         <Text style={styles.fieldLabel}>费用类型</Text>
         <View style={styles.segRow}>
@@ -1323,25 +1360,35 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         {/* 返钱：一次性结清 或 按计划分期（结算计划段，与 PC 端模板对齐） */}
         {expenseType === 1 ? (
           <View>
-            <Text style={styles.fieldLabel}>结算方式</Text>
-            <View style={styles.segRow}>
-              <TouchableOpacity style={[styles.segBtn, !planMode && styles.segBtnActive]} onPress={() => setPlanMode(false)}>
-                <Text style={[styles.segBtnText, !planMode && styles.segBtnTextActive]}>一次性结清</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.segBtn, planMode && styles.segBtnActive]} onPress={() => { setPlanMode(true); if (planList.length === 0) genSeasonal(); }}>
-                <Text style={[styles.segBtnText, planMode && styles.segBtnTextActive]}>按计划分期</Text>
-              </TouchableOpacity>
-            </View>
+            {settlementTiming === 2 ? (
+              <>
+                <Text style={styles.fieldLabel}>结算方式</Text>
+                <View style={styles.segRow}>
+                  <TouchableOpacity style={[styles.segBtn, !planMode && styles.segBtnActive]} onPress={() => setPlanMode(false)}>
+                    <Text style={[styles.segBtnText, !planMode && styles.segBtnTextActive]}>一次性结清</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.segBtn, planMode && styles.segBtnActive]} onPress={() => { setPlanMode(true); if (planList.length === 0) genSeasonal(); }}>
+                    <Text style={[styles.segBtnText, planMode && styles.segBtnTextActive]}>按计划分期</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>现给：当场一次性付清，无到期日 / 分期</Text>
+            )}
             {!planMode ? (
               <>
-                <Text style={styles.fieldLabel}>结账周期</Text>
-                <View style={styles.segRow}>
-                  {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 3, t: '按次' }, { k: 5, t: '季度结' }, { k: 6, t: '自定义' }] as { k: SettleMethod; t: string }[]).map((o) => (
-                    <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
-                      <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                {settlementTiming === 2 && (
+                  <>
+                    <Text style={styles.fieldLabel}>结账周期</Text>
+                    <View style={styles.segRow}>
+                      {([{ k: 1, t: '年结' }, { k: 2, t: '月结' }, { k: 3, t: '按次' }, { k: 5, t: '季度结' }, { k: 6, t: '自定义' }] as { k: SettleMethod; t: string }[]).map((o) => (
+                        <TouchableOpacity key={o.k} style={[styles.segBtn, settleMethod === o.k && styles.segBtnActive]} onPress={() => setSettleMethod(o.k)}>
+                          <Text style={[styles.segBtnText, settleMethod === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </>
+                )}
                 {settleMethod !== 3 ? (
                   <View>
                     <Text style={styles.fieldLabel}>到期日（年结/月结/季度结）</Text>
