@@ -411,15 +411,10 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                     <Text style={styles.itemItem}>{e.item || (isRebate ? (e.productName || '—') : '—')}</Text>
                     <View style={styles.itemAmountRow}>
                       {isConsign ? (
-                        isConsignRebate ? (
-                          isNow ? (
-                            <Text style={styles.itemAmount}>{`返货 ${round(consignReturnTotalQty)} 件`}</Text>
-                          ) : (
-                            <Text style={styles.itemAmount}>{`返货 ${round(consignReturnTotalQty)} 件 / 到期 ${e.maturityDate || '—'}`}</Text>
-                          )
-                        ) : (
-                          <Text style={styles.itemAmount}>{money(e.totalAmount)}</Text>
-                        )
+                        // 寄售单：金额/返货数量 + 到期日（纯「货物处置提醒」语义，与结算触发与否无关）
+                        <Text style={styles.itemAmount}>{`${
+                          isConsignRebate ? `返货 ${round(consignReturnTotalQty)} 件` : money(e.totalAmount)
+                        }${e.maturityDate ? ` · 到期日：${e.maturityDate}` : ''}`}</Text>
                       ) : isRebate ? (
                         <>
                           <Text style={styles.itemAmount}>{`每期 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
@@ -838,7 +833,12 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
           <InfoRow label="铺货商品" value={e.productName || '—'} />
           <InfoRow label="铺货数量" value={`${round(e.consignQty)}${e.consignUnit || '件'}`} />
           <InfoRow label="铺货总货值（进货价合计）" value={`¥${money(e.consignTotalValue)}`} />
-          <InfoRow label="铺货到期日" value={`${e.maturityDate || '—'}（货物处置提醒）`} />
+          {e.maturityDate ? (
+            <InfoRow
+              label="到期日"
+              value={`${e.maturityDate}（${e.settlementTiming === 1 ? '货物处置提醒，不涉及费用结算' : '结算触发日'}）`}
+            />
+          ) : null}
           <InfoRow label="结算方式" value={e.returnType === 2 ? '货物（供应商给付货物）' : '现金（陈列费金额）'} />
           {/* 货物处置状态（独立于结算状态）：仅作展示，到期前无操作入口 */}
           <Text style={[styles.fieldLabel, { marginTop: 8 }]}>货物处置状态</Text>
