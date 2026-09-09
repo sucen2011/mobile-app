@@ -161,6 +161,7 @@ export interface ReturnItem {
   spec: string;
   unit: string;        // 件/箱/瓶…
   qty: number;
+  unitPrice: number;   // 货物结算单价（元）；合计=Σ 数量×单价
 }
 
 // 返钱分期计划期次（与 PC 端 PlanPeriod 对齐；后端 plan_json TEXT 列存储）

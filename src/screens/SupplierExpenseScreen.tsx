@@ -11,7 +11,7 @@ import { SafeAreaHeader } from '../components/SafeArea';
 import DatePickerField from '../components/DatePickerField';
 import {
   fetchExpenses, getExpenseDetail, fetchExpenseSummary, createExpense, updateExpense, settleExpense,
-  deleteExpense, reverseExpense, uploadExpenseImage, fetchExpenseBrands, updateDisposalStatus,
+  deleteExpense, reverseExpense, uploadExpenseImage, fetchExpenseBrands,
   EXPENSE_TYPE_LABEL, SETTLE_METHOD_LABEL, REBATE_CYCLE_LABEL, PAYMENT_LABEL, SETTLEMENT_TIMING_LABEL, DISPOSAL_STATUS_LABEL,
   isRebateLikeExpense,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
@@ -819,27 +819,18 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
           <InfoRow label="铺货商品" value={e.productName || '—'} />
           <InfoRow label="铺货数量" value={`${round(e.consignQty)}${e.consignUnit || '件'}`} />
           <InfoRow label="铺货总货值（进货价合计）" value={`¥${money(e.consignTotalValue)}`} />
-          <InfoRow label="铺货到期日" value={`${e.maturityDate || '—'}${e.settlementTiming === 1 ? '（货物处置提醒）' : ''}`} />
-          <InfoRow label="到期返还形式" value={e.returnType === 2 ? '到期返货' : '到期返钱'} />
-          {/* 货物处置状态（独立于结算状态）：待处置 / 已拉走 / 已续约，可独立更新 */}
+          <InfoRow label="铺货到期日" value={`${e.maturityDate || '—'}（货物处置提醒）`} />
+          <InfoRow label="结算方式" value={e.returnType === 2 ? '货物（供应商给付货物）' : '现金（陈列费金额）'} />
+          {/* 货物处置状态（独立于结算状态）：仅作展示，到期前无操作入口 */}
           <Text style={[styles.fieldLabel, { marginTop: 8 }]}>货物处置状态</Text>
-          <View style={styles.segRow}>
+          <View style={[styles.segRow, { opacity: 0.85 }]}>
             {([{ k: 0, t: '待处置' }, { k: 1, t: '已拉走' }, { k: 2, t: '已续约' }] as { k: number; t: string }[]).map((o) => (
-              <TouchableOpacity
-                key={o.k}
-                style={[styles.segBtn, disposalLocal === o.k && styles.segBtnActive]}
-                onPress={() => {
-                  setDisposalLocal(o.k);
-                  updateDisposalStatus(baseUrl, e.id, o.k).catch(() => {
-                    Alert.alert('提示', '更新货物处置状态失败，请重试');
-                    setDisposalLocal(e.disposalStatus || 0);
-                  });
-                }}
-              >
+              <View key={o.k} style={[styles.segBtn, disposalLocal === o.k && styles.segBtnActive]}>
                 <Text style={[styles.segBtnText, disposalLocal === o.k && styles.segBtnTextActive]}>{DISPOSAL_STATUS_LABEL[o.k]}</Text>
-              </TouchableOpacity>
+              </View>
             ))}
           </View>
+          <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>到期前仅作提醒，到期后（拉走 / 续约）方可处置</Text>
           {Array.isArray(e.consignItems) && e.consignItems.length > 0 ? (
             <View style={styles.consignItemList}>
               <Text style={styles.subTitle}>铺货商品明细</Text>
@@ -1071,7 +1062,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const removeConsignItem = (idx: number) =>
     setConsignItems((prev) => prev.filter((_, i) => i !== idx));
   // 寄售到期返货（returnType=2）：独立的「返货商品明细」多行列表，与铺货明细互不干扰
-  const blankReturnItem = (): ReturnItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0 });
+  const blankReturnItem = (): ReturnItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0, unitPrice: 0 });
   const [returnItems, setReturnItems] = useState<ReturnItem[]>(
     Array.isArray(e?.consignReturnItems) && e!.consignReturnItems.length > 0
       ? e!.consignReturnItems.map((it: ReturnItem) => ({ ...it }))
@@ -1703,21 +1694,21 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
             <Text style={styles.fieldLabel}>{settlementTiming === 1 ? '寄售到期日（货物处置提醒）*' : '寄售到期日 *'}</Text>
             <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
 
-            {settlementTiming === 2 && (
+            {expenseType === 3 && (
               <>
-                <Text style={styles.fieldLabel}>到期返还形式</Text>
+                <Text style={styles.fieldLabel}>结算方式（陈列费以现金或货物给付）</Text>
                 <View style={styles.segRow}>
                   <TouchableOpacity style={[styles.segBtn, returnType === 1 && styles.segBtnActive]} onPress={() => setReturnType(1)}>
-                    <Text style={[styles.segBtnText, returnType === 1 && styles.segBtnTextActive]}>到期返钱</Text>
+                    <Text style={[styles.segBtnText, returnType === 1 && styles.segBtnTextActive]}>现金（陈列费金额）</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.segBtn, returnType === 2 && styles.segBtnActive]} onPress={() => setReturnType(2)}>
-                    <Text style={[styles.segBtnText, returnType === 2 && styles.segBtnTextActive]}>到期返货</Text>
+                    <Text style={[styles.segBtnText, returnType === 2 && styles.segBtnTextActive]}>货物（供应商给付货物）</Text>
                   </TouchableOpacity>
                 </View>
               </>
             )}
 
-            {(returnType === 1 || settlementTiming === 1) ? (
+            {(returnType === 1) ? (
               <>
                 <Text style={styles.fieldLabel}>陈列费金额（元）*</Text>
                 <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
@@ -1775,12 +1766,21 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                         </View>
                         <View style={{ width: 12 }} />
                         <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabel}>单价（元）*</Text>
+                          <TextInput style={styles.input} value={String(it.unitPrice)} {...numInput((v) => updateReturnItem(idx, { unitPrice: Number(v) || 0 }))} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+                        </View>
+                      </View>
+                      <View style={styles.dualRow}>
+                        <View style={{ flex: 1 }}>
                           <Text style={styles.fieldLabel}>单位</Text>
                           <TextInput style={styles.input} value={it.unit} onChangeText={(v) => updateReturnItem(idx, { unit: v })} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
                         </View>
+                        <View style={{ width: 12 }} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabel}>规格</Text>
+                          <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateReturnItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+                        </View>
                       </View>
-                      <Text style={styles.fieldLabel}>规格</Text>
-                      <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateReturnItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
                     </View>
                   );
                 })}
@@ -1792,16 +1792,16 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 </View>
               </>
             )}
-            {/* 货物处置状态（独立于结算状态）：待处置 / 已拉走 / 已续约 */}
+            {/* 货物处置状态（独立于结算状态）：仅作展示，到期前无操作入口 */}
             <Text style={styles.fieldLabel}>货物处置状态</Text>
-            <View style={styles.segRow}>
+            <View style={[styles.segRow, { opacity: 0.85 }]}>
               {([{ k: 0, t: '待处置' }, { k: 1, t: '已拉走' }, { k: 2, t: '已续约' }] as { k: number; t: string }[]).map((o) => (
-                <TouchableOpacity key={o.k} style={[styles.segBtn, disposalStatus === o.k && styles.segBtnActive]} onPress={() => setDisposalStatus(o.k)}>
+                <View key={o.k} style={[styles.segBtn, disposalStatus === o.k && styles.segBtnActive]}>
                   <Text style={[styles.segBtnText, disposalStatus === o.k && styles.segBtnTextActive]}>{DISPOSAL_STATUS_LABEL[o.k]}</Text>
-                </TouchableOpacity>
+                </View>
               ))}
             </View>
-            <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>到期日仅作货物处置提醒（拉走或续约），与费用结算无关</Text>
+            <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>到期前仅作提醒，到期后（拉走 / 续约）方可处置，与费用结算无关</Text>
           </View>
         )}
 
