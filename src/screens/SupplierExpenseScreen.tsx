@@ -16,7 +16,7 @@ import {
   isRebateLikeExpense,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
   type ExpenseType, type SettleMethod, type SettlementTiming, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
-  type PlanPeriod, type ConsignItem,
+  type PlanPeriod, type ConsignItem, type ReturnItem,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
 import { listSuppliers, listProducts } from '../db/localDb';
@@ -830,6 +830,17 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
               ))}
             </View>
           ) : null}
+          {isConsign && e.returnType === 2 && Array.isArray(e.consignReturnItems) && e.consignReturnItems.length > 0 ? (
+            <View style={styles.consignItemList}>
+              <Text style={styles.subTitle}>返货商品明细（结算时供应商给付）</Text>
+              {e.consignReturnItems.map((it: ReturnItem, i: number) => (
+                <View key={i} style={styles.consignItemRow}>
+                  <Text style={styles.consignItemName}>{it.name}</Text>
+                  <Text style={styles.consignItemMeta}>{`${round(it.qty)}${it.unit || '件'}${it.spec ? ` · ${it.spec}` : ''}`}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -1036,6 +1047,19 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setConsignItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
   const removeConsignItem = (idx: number) =>
     setConsignItems((prev) => prev.filter((_, i) => i !== idx));
+  // 寄售到期返货（returnType=2）：独立的「返货商品明细」多行列表，与铺货明细互不干扰
+  const blankReturnItem = (): ReturnItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0 });
+  const [returnItems, setReturnItems] = useState<ReturnItem[]>(
+    Array.isArray(e?.consignReturnItems) && e!.consignReturnItems.length > 0
+      ? e!.consignReturnItems.map((it: ReturnItem) => ({ ...it }))
+      : [blankReturnItem()]
+  );
+  const [returnNameFocus, setReturnNameFocus] = useState<number | null>(null);
+  const updateReturnItem = (idx: number, patch: Partial<ReturnItem>) =>
+    setReturnItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const removeReturnItem = (idx: number) =>
+    setReturnItems((prev) => prev.filter((_, i) => i !== idx));
+  const returnTotalQty = returnItems.reduce((s, it) => s + (Number(it.qty) || 0), 0);
   // 品牌（按供应商区分费用，自由文本 + 历史联想）
   const [brand, setBrand] = useState(e?.brand || '');
   const [brandOptions, setBrandOptions] = useState<string[]>([]);
@@ -1099,6 +1123,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setSettlementTiming(k === 3 ? 2 : (k === 2 ? 2 : 1));
     setProductName(''); setProductId(0);
     setConsignItems([blankConsignItem()]); setConsignMaturity(''); setReturnType(1);
+    setReturnItems([blankReturnItem()]); setReturnNameFocus(null);
     setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
     setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
   };
@@ -1143,11 +1168,19 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         if (a <= 0) { onError('陈列费金额需大于 0'); return; }
         payload.totalAmount = a;
       } else if (returnType === 2) {
-        // 到期返货：供应商以货物支付陈列费，货值 = totalAmount（固定费用金额），固定 1 期，不扣减库存
-        const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
-        if (a <= 0) { onError('供应商给付货值需大于 0'); return; }
-        payload.totalAmount = a;
-        payload.rebateUnit = validItems[0]?.unit?.trim() || '件';
+        // 到期返货：供应商以「具体商品」支付陈列费（返货商品明细多行），不再填货值金额
+        const validReturns = returnItems.filter((it) => it.name.trim() && Number(it.qty) > 0);
+        if (validReturns.length === 0) { onError('请至少添加一行返货商品（品名 + 数量 > 0）'); return; }
+        payload.consignReturnItems = validReturns.map((it) => ({
+          productId: Number(it.productId) || 0,
+          name: it.name.trim().slice(0, 128),
+          spec: (it.spec || '').trim().slice(0, 64),
+          unit: (it.unit || '').trim().slice(0, 16) || '件',
+          qty: Math.max(0, Number(it.qty) || 0),
+        }));
+        // 货值字段置 0：返货以实物结算，不折算金额；与 PC 一致
+        payload.totalAmount = 0;
+        payload.rebateUnit = validReturns[0]?.unit?.trim() || '件';
         payload.rebateTotalPeriods = 1;
       }
     } else if (expenseType === 2) {
@@ -1328,17 +1361,17 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           </View>
         ) : null}
 
-        {/* 结算时机（上层）：现给 / 到期给 */}
+        {/* 结算时机（上层）：现给 / 到期给。寄售业务上建议「到期给」，但可手动切到「现给」 */}
         <Text style={styles.fieldLabel}>结算时机</Text>
         <View style={styles.segRow}>
           {([{ k: 1, t: '现给' }, { k: 2, t: '到期给' }] as { k: SettlementTiming; t: string }[]).map((o) => (
-            <TouchableOpacity key={o.k} style={[styles.segBtn, settlementTiming === o.k && styles.segBtnActive]} onPress={() => setSettlementTimingSafe(o.k)} disabled={expenseType === 3}>
+            <TouchableOpacity key={o.k} style={[styles.segBtn, settlementTiming === o.k && styles.segBtnActive]} onPress={() => setSettlementTimingSafe(o.k)}>
               <Text style={[styles.segBtnText, settlementTiming === o.k && styles.segBtnTextActive]}>{o.t}</Text>
             </TouchableOpacity>
           ))}
         </View>
         {expenseType === 3 ? (
-          <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>寄售铺货固定为「到期给」</Text>
+          <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>寄售建议「到期给」；如选现给，请到期时手动结算</Text>
         ) : null}
 
         {/* 费用类型 */}
@@ -1655,8 +1688,72 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
               </>
             ) : (
               <>
-                <Text style={styles.fieldLabel}>供应商给付货值（元）*</Text>
-                <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
+                <Text style={styles.fieldLabel}>返货商品明细 *（每行一件，可手填或从商品库选择）</Text>
+                {returnItems.map((it, idx) => {
+                  const sugg = it.name.trim()
+                    ? productOptions.filter((p) => p.name.toLowerCase().includes(it.name.trim().toLowerCase())).slice(0, 5)
+                    : [];
+                  return (
+                    <View key={idx} style={styles.consignItemCard}>
+                      <View style={styles.consignItemHead}>
+                        <Text style={styles.consignItemTitle}>{`返货商品 ${idx + 1}`}</Text>
+                        <TouchableOpacity onPress={() => removeReturnItem(idx)}>
+                          <Text style={styles.consignItemDel}>删除</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.fieldLabel}>品名 *</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={it.name}
+                        onFocus={() => setReturnNameFocus(idx)}
+                        onBlur={() => setReturnNameFocus(null)}
+                        onChangeText={(v) => updateReturnItem(idx, { name: v, productId: 0 })}
+                        placeholder="如：可乐 330ml"
+                        placeholderTextColor={theme.color.textAppTertiary}
+                      />
+                      {returnNameFocus === idx && sugg.length > 0 ? (
+                        <View style={styles.suggestBox}>
+                          {sugg.map((p: Product) => (
+                            <TouchableOpacity
+                              key={String(p.id ?? p.name)}
+                              style={styles.suggestItem}
+                              onPress={() => {
+                                updateReturnItem(idx, {
+                                  name: p.name,
+                                  productId: Number(p.id) || 0,
+                                  unit: it.unit || p.unit || '件',
+                                  spec: it.spec || p.spec || '',
+                                });
+                                setReturnNameFocus(null);
+                              }}
+                            >
+                              <Text style={styles.suggestText}>{`${p.name}${p.spec ? `（${p.spec}）` : ''}`}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      ) : null}
+                      <View style={styles.dualRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabel}>数量 *</Text>
+                          <TextInput style={styles.input} value={String(it.qty)} {...numInput((v) => updateReturnItem(idx, { qty: Number(v) || 0 }))} placeholder="如 100" placeholderTextColor={theme.color.textAppTertiary} />
+                        </View>
+                        <View style={{ width: 12 }} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.fieldLabel}>单位</Text>
+                          <TextInput style={styles.input} value={it.unit} onChangeText={(v) => updateReturnItem(idx, { unit: v })} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
+                        </View>
+                      </View>
+                      <Text style={styles.fieldLabel}>规格</Text>
+                      <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateReturnItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+                    </View>
+                  );
+                })}
+                <TouchableOpacity style={styles.addItemBtn} onPress={() => setReturnItems((prev) => [...prev, blankReturnItem()])}>
+                  <Text style={styles.addItemBtnText}>＋ 添加返货商品</Text>
+                </TouchableOpacity>
+                <View style={styles.summaryBox}>
+                  <Text style={styles.summaryText}>{`返货总数量 ${returnTotalQty} 件`}</Text>
+                </View>
               </>
             )}
           </View>
@@ -2211,6 +2308,9 @@ function makeStyles(theme: any) {
     consignItemHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: theme.spaceScale[2] },
     consignItemTitle: { fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },
     consignItemDel: { fontSize: theme.font.sizeV4.caption, color: theme.color.danger, fontWeight: theme.font.weight.medium },
+    suggestBox: { marginTop: theme.spaceScale[2], backgroundColor: theme.color.surfaceApp, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, overflow: 'hidden' },
+    suggestItem: { paddingVertical: theme.spaceScale[2], paddingHorizontal: theme.spaceScale[4], borderBottomWidth: 1, borderBottomColor: theme.color.borderApp },
+    suggestText: { fontSize: theme.font.sizeV4.body, color: theme.color.textApp },
     addItemBtn: { marginTop: theme.spaceScale[3], borderWidth: 1, borderStyle: 'dashed', borderColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: S.controlLg, alignItems: 'center', justifyContent: 'center' },
     addItemBtnText: { color: theme.color.primaryVivid, fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.medium },
     summaryBox: { marginTop: theme.spaceScale[3], backgroundColor: theme.color.primarySoft, borderRadius: theme.radius.md, paddingVertical: theme.spaceScale[3], paddingHorizontal: theme.spaceScale[4] },

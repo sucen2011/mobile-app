@@ -101,6 +101,8 @@ export interface SupplierExpense {
   consignItems: ConsignItem[];
   // 铺货总价值 = Σ 非搭赠行 qty×costPrice，后端已算好，前端只读展示
   consignTotalValue: number;
+  // 寄售到期返货（expenseType=3 & returnType=2）的商品明细：供应商应付给付的具体商品（多行）
+  consignReturnItems: ReturnItem[];
   // 返货每期独立结算：已确认期次的 seq 数组（如 [1,3] 表示第1、3期已确认收货）；老数据空缺
   rebateSettledPeriods?: number[];
   // 返钱分期计划（expenseType=1 且启用计划时有值；totalAmount=计划合计推导）
@@ -145,6 +147,16 @@ export interface ConsignItem {
   costPrice: number;  // 进货价（即表格里的「单价」）
   salePrice: number;  // 零售价
   type: 'normal' | 'gift';
+}
+
+// 寄售返货商品明细：到期结算时供应商应付给付的具体商品（多行，可从商品库调取或手填）
+// 与铺货明细 consignItems 独立，互不影响
+export interface ReturnItem {
+  productId: number;   // 0=手填；>0=从商品库命中
+  name: string;
+  spec: string;
+  unit: string;        // 件/箱/瓶…
+  qty: number;
 }
 
 // 返钱分期计划期次（与 PC 端 PlanPeriod 对齐；后端 plan_json TEXT 列存储）
@@ -228,6 +240,8 @@ export type ExpensePayload = {
   consignSalePrice?: number;
   // 寄售铺货多行商品明细（expenseType=3）：前端只传 consignItems，后端派生 productId/productName/consignUnit/consignQty/consignCostPrice/consignSalePrice
   consignItems?: ConsignItem[];
+  // 寄售到期返货（expenseType=3 & returnType=2）必传：返货商品明细（多行）；后端校验至少 1 行
+  consignReturnItems?: ReturnItem[];
   images?: ExpenseImageDraft[];
   // 返钱分期计划：启用计划时传期次数组（总额由计划合计推导）；关闭计划时传 [] 清空残留
   planJson?: PlanPeriod[];
