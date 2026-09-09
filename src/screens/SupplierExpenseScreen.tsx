@@ -390,6 +390,15 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               const isRebate = e.expenseType === 2;
               const isConsign = e.expenseType === 3;
               const isConsignRebate = isConsign && e.returnType === 2;
+              // 结算时机：1=现给 2=到期给。现给返货已当场结清，不应按「返完 N 期」口径显示。
+              const isNow = e.settlementTiming === 1;
+              // 寄售返货（returnType=2）的数量存放在 consignReturnItems（多行返货商品），不在 rebateQty。
+              const consignReturnTotalQty = isConsignRebate
+                ? (Array.isArray(e.consignReturnItems) ? e.consignReturnItems : []).reduce(
+                    (s, it) => s + (Number(it.qty) || 0),
+                    0,
+                  )
+                : 0;
               return (
                 <View key={e.id} style={[styles.itemCard, i > 0 && { marginTop: theme.spaceScale[3] }]}>
                   <TouchableOpacity style={styles.itemMain} onPress={() => openDetail(e.id)} activeOpacity={0.7}>
@@ -403,7 +412,11 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                     <View style={styles.itemAmountRow}>
                       {isConsign ? (
                         isConsignRebate ? (
-                          <Text style={styles.itemAmount}>{`返货 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
+                          isNow ? (
+                            <Text style={styles.itemAmount}>{`返货 ${round(consignReturnTotalQty)} 件`}</Text>
+                          ) : (
+                            <Text style={styles.itemAmount}>{`返货 ${round(consignReturnTotalQty)} 件 / 到期 ${e.maturityDate || '—'}`}</Text>
+                          )
                         ) : (
                           <Text style={styles.itemAmount}>{money(e.totalAmount)}</Text>
                         )
@@ -419,7 +432,12 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                         </>
                       )}
                       {isConsign ? (
-                        <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
+                        // 现给返货已当场结清：状态区显示「已结清」，不再按「返完 N 期 / 未收」口径
+                        isConsignRebate && isNow ? (
+                          <Text style={styles.itemUnsettled}>已结清</Text>
+                        ) : (
+                          <Text style={styles.itemUnsettled}>未收 {money(e.unsettledAmount)}</Text>
+                        )
                       ) : isRebate ? (
                         <Text style={styles.itemUnsettled}>{`已返 ${round(e.settledAmount)} 期`}</Text>
                       ) : (
@@ -442,7 +460,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                       {!isRebate && Array.isArray(e.planJson) && e.planJson.length > 0 ? (
                         <Text style={styles.planListTag}>{`已 ${e.planJson.filter((p) => p.status === 1).length}/${e.planJson.length} 期`}</Text>
                       ) : null}
-                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isConsign ? (isConsignRebate ? '寄售·返货' : '寄售') : isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
+                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isConsign ? (isConsignRebate ? (isNow ? '返货' : '到期返货') : (isNow ? '返钱' : '到期返钱')) : isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
                     </View>
                   </TouchableOpacity>
                   <View style={styles.itemActions}>
