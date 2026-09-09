@@ -288,7 +288,25 @@ function parseTotal(lines: string[]): number | undefined {
   return undefined;
 }
 
-const BARCODE_RE = /\b(\d{12,14})(?:箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐)?(?!\d)/;
+// 条码候选：12 位 UPC-A / 13 位 EAN-13（最常见）。
+// 中国 EAN-13 多 690-695 开头，进口可能 690-699/800-839，不做硬前缀限制（仅"包含"做合理性提示）。
+// 仅用于"本行是否含条码"的快速检测；取值统一走 extractBarcode。
+const BARCODE_RE = /\b\d{12,13}\b/;
+
+/**
+ * 从单行（或整段）OCR 文本里抽取商品条码。
+ * 规则：候选 12 位 UPC-A / 13 位 EAN-13；同一文本出现多个数字序列时，
+ * 优先 13 位、其次 12 位（按长度倒序选最像条码者）。抽不到返回 ''（绝不臆造）。
+ * PC / Mobile 两端共用同一规则，保持解析口径一致。
+ */
+export function extractBarcode(text: string): string {
+  if (!text) return '';
+  const matches = text.match(/\b\d{12,13}\b/g);
+  if (!matches || matches.length === 0) return '';
+  // 长度倒序：13 位优先于 12 位
+  const sorted = [...matches].sort((a, b) => b.length - a.length);
+  return sorted[0];
+}
 const COLUMN_HEADERS = /^(规格|建议零售价|零售价|单价|金额|总价|小计|数量|单位|件数|条码|商品条码|商品名称|品名|名称|货品|货名|产品名称|项目|序号|编号|备注|价格|条形码|商品条码)$/;
 const NON_NAME_KEYWORDS = /(客户|地址|电话|单据编号|交易日期|总计|每页小计|送货热线|货物当面点清|货已收|客户签字|白单|红单|黄单|存根|请收货单位|本单据|备注|业务人员|请付给|谢谢配合|销售单|购物清单|访销单|送货单|销货单|出货单|发货单|批发单|供货单|配货单|销售清单|采购单|订单|清单|单据|欠|\+|听)/;
 function isProductNameLine(line: string): boolean {
@@ -380,9 +398,7 @@ function findColumnarDataStart(lines: string[]): number {
 }
 
 function parseColumnarGroup(group: string[]): BillItem | null {
-  const barcodeLine = group.find((l) => BARCODE_RE.test(l));
-  const barcodeMatch = barcodeLine?.match(BARCODE_RE);
-  const barcode = barcodeMatch ? barcodeMatch[1] : undefined;
+  const barcode = extractBarcode(group.join(' '));
 
   // 名称：含中文且不是单位/合计大写/页脚文字
   let name = '';
@@ -462,7 +478,7 @@ function parseColumnarGroup(group: string[]): BillItem | null {
     }
   }
 
-  return { name, barcode, unit, quantity, price, amount };
+  return { name, barcode: barcode || '', unit, quantity, price, amount };
 }
 
 function tryParseColumnarTable(lines: string[]): BillItem[] | null {
@@ -629,7 +645,7 @@ function mergeColumnarTable(lines: string[]): string[] {
   // 旧版拆列合并仍保留：当 OCR 输出是典型横向/单列条码时继续可用
   const barcodeIdxs: number[] = [];
   lines.forEach((l, i) => {
-    if (/^\d{12,14}$/.test(l.trim())) barcodeIdxs.push(i);
+    if (extractBarcode(l) !== '') barcodeIdxs.push(i);
   });
   if (barcodeIdxs.length < 2) return [];
   const gaps = barcodeIdxs.slice(1).map((v, i) => v - barcodeIdxs[i]);
@@ -670,7 +686,7 @@ function mergeColumnarTable(lines: string[]): string[] {
 function stripBarcodeFromName(line: string, barcode?: string): string {
   let n = line;
   if (barcode) n = n.split(barcode).join(' ');
-  n = n.replace(/\b\d{12,14}\b/g, ' ');
+  n = n.replace(/\b\d{12,13}\b/g, ' ');
   // 也去掉 OCR 截断产生的 8~11 位残缺条码（通常后面紧跟着货号/名称）
   n = n.replace(/\b\d{8,11}\b(?=\s+(?:[A-Z]\d{2,3}|[一-龥]))/g, ' ');
   // 去掉 OCR 常见的悬空左/右括号（如 "...豆腩(微辣味" → "...豆腩微辣味"）
@@ -872,8 +888,7 @@ function parseItems(lines: string[]): BillItem[] {
     const prevBc = barcodeIdxs[k - 1] ?? -1;
     const nextBc = barcodeIdxs[k + 1] ?? lines.length;
 
-    const barcodeMatch = lines[bcIdx].match(BARCODE_RE);
-    const barcode = barcodeMatch ? barcodeMatch[1] : undefined;
+    const barcode = extractBarcode(lines[bcIdx]);
 
     // 横向表格：一行内已包含名称与数量/单价/金额，直接行内解析，不参与竖排分配
     const inline = parseInlineRow(lines[bcIdx], barcode);
@@ -882,7 +897,7 @@ function parseItems(lines: string[]): BillItem[] {
       if (inlineName) {
         items.push({
           name: inlineName,
-          barcode,
+          barcode: barcode || '',
           unit: inline.unit,
           quantity: inline.quantity,
           price: inline.price,
@@ -994,7 +1009,7 @@ function parseItems(lines: string[]): BillItem[] {
       price = Number((amount / quantity).toFixed(4));
     }
 
-    items.push({ name: bestName, barcode, unit: assignedUnit.get(bcIdx), quantity, price, amount });
+    items.push({ name: bestName, barcode: barcode || '', unit: assignedUnit.get(bcIdx), quantity, price, amount });
   }
 
   if (items.length > 0) return items.slice(0, 50);
@@ -1021,8 +1036,8 @@ function parseItemsFallback(lines: string[]): BillItem[] {
   const fillValue = (raw: string, pending: BillItem): void => {
     const line = raw.replace(/[|｜]/g, ' ').trim();
     const nums = (line.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
-    const bar = line.match(/\b([0-9]{12,14})\b/);
-    if (bar && !pending.barcode) pending.barcode = bar[1];
+    const bar = extractBarcode(line);
+    if (bar && !pending.barcode) pending.barcode = bar;
     if (nums.length === 0) return;
     if (UNIT_WORD.test(line) && pending.quantity === undefined) {
       pending.quantity = nums[0];
@@ -1048,8 +1063,8 @@ function parseItemsFallback(lines: string[]): BillItem[] {
       if (COLUMN_HEADERS_FALLBACK.test(noNumNoSym)) continue;
 
       let working = line;
-      const barcodeMatch = working.match(/\b(\d{12,14})\b/);
-      if (barcodeMatch) working = working.replace(barcodeMatch[0], ' ');
+      const barcodeMatch = extractBarcode(working);
+      if (barcodeMatch) working = working.replace(barcodeMatch, ' ');
       working = working.replace(/^\d+\s*[.、]?\s+/, ' ');
 
       const c1 = working.match(/(\d+(?:\.\d+)?[a-zA-Z]*[一-龥]{2,})/);
@@ -1076,10 +1091,10 @@ function parseItemsFallback(lines: string[]): BillItem[] {
         .replace(/\d+\s*[-*xX×]\s*\d+/g, ' ');
 
       let nums = (working.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
-      const it: BillItem = { name };
+      const it: BillItem = { name, barcode: '' };
       if (barcodeMatch) {
-        it.barcode = barcodeMatch[1];
-        const bcNum = Number(barcodeMatch[1]);
+        it.barcode = barcodeMatch;
+        const bcNum = Number(barcodeMatch);
         nums = nums.filter((n) => n !== bcNum);
       }
 
@@ -1157,7 +1172,7 @@ function parseItemsFallback(lines: string[]): BillItem[] {
       name = name.replace(/(桶装|瓶装|盒装|袋装|箱装|听装|罐装|罐|箱|瓶|包|个|袋|盒|件|条|桶|提|只)$/, '');
       if (name && /[一-龥]/.test(name)) {
         flush();
-        pending = { name, quantity: undefined, price: undefined, amount: undefined };
+        pending = { name, barcode: '', quantity: undefined, price: undefined, amount: undefined };
         const valPart = raw
           .replace(name, ' ')
           .replace(/\d+\s*(?:ml|ML|mL|L|l|kg|KG|g|G|克|毫升|升)\s*(?:\*\s*\d+)?/g, ' ')
