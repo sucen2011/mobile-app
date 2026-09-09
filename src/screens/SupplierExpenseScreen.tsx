@@ -3,6 +3,7 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert, TextInput,
   Switch, Modal, Image, RefreshControl, Share, ActivityIndicator, Platform,
 } from 'react-native';
+import dayjs from 'dayjs';
 // ⚠️ 必须从 expo-file-system/legacy 导入：SDK 54+ 主入口的 writeAsStringAsync 是调用即 throw 的弃用桩
 import * as FileSystem from 'expo-file-system/legacy';
 import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
@@ -1051,6 +1052,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       : [blankConsignItem()]
   );
   const [consignMaturity, setConsignMaturity] = useState(e?.maturityDate || '');
+  // 寄售期限预设（0=自定义，其余为月数）：选预设自动算到期日；手动改到期日则回到自定义
+  const [consignTerm, setConsignTerm] = useState<number>(0);
   const [returnType, setReturnType] = useState<number>(e?.returnType || 1);
   // 货物处置状态（寄售独立字段，0=待处置 1=已拉走 2=已续约），独立于结算状态
   const [disposalStatus, setDisposalStatus] = useState<number>(e?.disposalStatus || 0);
@@ -1062,7 +1065,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const removeConsignItem = (idx: number) =>
     setConsignItems((prev) => prev.filter((_, i) => i !== idx));
   // 寄售到期返货（returnType=2）：独立的「返货商品明细」多行列表，与铺货明细互不干扰
-  const blankReturnItem = (): ReturnItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0, unitPrice: 0 });
+  const blankReturnItem = (): ReturnItem => ({ productId: 0, name: '', spec: '', unit: '件', qty: 0 });
   const [returnItems, setReturnItems] = useState<ReturnItem[]>(
     Array.isArray(e?.consignReturnItems) && e!.consignReturnItems.length > 0
       ? e!.consignReturnItems.map((it: ReturnItem) => ({ ...it }))
@@ -1691,8 +1694,26 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
             </View>
 
 
+            <Text style={styles.fieldLabel}>寄售期限</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {([{ v: 3, t: '3个月' }, { v: 6, t: '6个月' }, { v: 9, t: '9个月' }, { v: 12, t: '1年' }, { v: 24, t: '2年' }, { v: 0, t: '自定义' }] as { v: number; t: string }[]).map((o) => (
+                <TouchableOpacity
+                  key={o.v}
+                  style={[styles.segBtn, consignTerm === o.v && styles.segBtnActive]}
+                  onPress={() => {
+                    setConsignTerm(o.v);
+                    if (o.v > 0) {
+                      const d = dayjs().add(o.v, 'month').format('YYYY-MM-DD');
+                      setConsignMaturity(d);
+                    }
+                  }}
+                >
+                  <Text style={[styles.segBtnText, consignTerm === o.v && styles.segBtnTextActive]}>{o.t}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
             <Text style={styles.fieldLabel}>{settlementTiming === 1 ? '寄售到期日（货物处置提醒）*' : '寄售到期日 *'}</Text>
-            <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
+            <DatePickerField value={consignMaturity} onChange={(d: string) => { setConsignMaturity(d); setConsignTerm(0); }} title="寄售到期日" />
 
             {expenseType === 3 && (
               <>
@@ -1766,21 +1787,12 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                         </View>
                         <View style={{ width: 12 }} />
                         <View style={{ flex: 1 }}>
-                          <Text style={styles.fieldLabel}>单价（元）*</Text>
-                          <TextInput style={styles.input} value={String(it.unitPrice)} {...numInput((v) => updateReturnItem(idx, { unitPrice: Number(v) || 0 }))} placeholder="0.00" placeholderTextColor={theme.color.textAppTertiary} />
-                        </View>
-                      </View>
-                      <View style={styles.dualRow}>
-                        <View style={{ flex: 1 }}>
                           <Text style={styles.fieldLabel}>单位</Text>
                           <TextInput style={styles.input} value={it.unit} onChangeText={(v) => updateReturnItem(idx, { unit: v })} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
                         </View>
-                        <View style={{ width: 12 }} />
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.fieldLabel}>规格</Text>
-                          <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateReturnItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
-                        </View>
                       </View>
+                      <Text style={styles.fieldLabel}>规格</Text>
+                      <TextInput style={styles.input} value={it.spec} onChangeText={(v) => updateReturnItem(idx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
                     </View>
                   );
                 })}
