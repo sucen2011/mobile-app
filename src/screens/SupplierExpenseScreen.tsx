@@ -1739,7 +1739,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
               </View>
             </View>
             <Text style={styles.fieldLabel}>{settlementTiming === 1 ? '寄售到期日（货物处置提醒）*' : '寄售到期日 *'}</Text>
-            <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
+            <DatePickerField value={consignMaturity} onChange={(d: string) => { setConsignMaturity(d); setConsignTermQty(0); }} title="寄售到期日" />
 
             {expenseType === 3 && (
               <>
