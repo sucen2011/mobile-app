@@ -45,7 +45,7 @@ export type RebateCycle = 1 | 2 | 3 | 4;       // 1=每月 2=每年 3=每季度 
 export type PaymentMethod = 1 | 2 | 3 | 4;     // 1=转账 2=现金 3=冲抵货款 4=其他
 export type ExpenseStatus = 0 | 1 | 2;
 // 结算时机（与 PC retail-admin 对齐）：1=现给（当场一次性收付，无到期日/无分期）/ 2=到期给（按到期日或分期结算）
-// 寄售(expenseType=3) 强制 2；返钱默认现给、返货默认到期给（与旧行为一致）
+// 寄售(expenseType=3) 现给/到期给皆可：现给=陈列费当场付清、单状态直接已结清、到期日仅作货物处置提醒；返钱默认现给、返货默认到期给
 export type SettlementTiming = 1 | 2;
 export const SETTLEMENT_TIMING_LABEL: Record<SettlementTiming, string> = { 1: '现给', 2: '到期给' };
 
@@ -53,6 +53,8 @@ export const EXPENSE_TYPE_LABEL: Record<ExpenseType, string> = { 1: '返钱', 2:
 export const SETTLE_METHOD_LABEL: Record<SettleMethod, string> = { 1: '年结', 2: '月结', 3: '按次', 5: '季度结', 6: '自定义' };
 export const REBATE_CYCLE_LABEL: Record<RebateCycle, string> = { 1: '每月', 2: '每年', 3: '每季度', 4: '自定义' };
 export const PAYMENT_LABEL: Record<PaymentMethod, string> = { 1: '转账', 2: '现金', 3: '冲抵货款', 4: '其他' };
+// 货物处置状态（独立于结算状态）：0=待处置 1=已拉走 2=已续约；仅寄售铺货(expenseType=3)使用
+export const DISPOSAL_STATUS_LABEL: Record<number, string> = { 0: '待处置', 1: '已拉走', 2: '已续约' };
 
 // 统一判定：返货(expenseType=2) 与 寄售到期返货(expenseType=3 & returnType=2)
 // 走「确认收货 + 期次推进」结算；其余（返钱、寄售到期返钱）走金额结算。
@@ -70,7 +72,7 @@ export interface SupplierExpense {
   expenseType: ExpenseType;
   item: string;
   settleMethod: SettleMethod;
-  settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售强制2）
+  settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售现给/到期给皆可）
   expenseDate: string;
   dueDate: string;
   totalAmount: number;
@@ -103,6 +105,8 @@ export interface SupplierExpense {
   consignTotalValue: number;
   // 寄售到期返货（expenseType=3 & returnType=2）的商品明细：供应商应付给付的具体商品（多行）
   consignReturnItems: ReturnItem[];
+  // 货物处置状态（独立于结算状态）：0=待处置 1=已拉走 2=已续约；仅寄售铺货(expenseType=3)
+  disposalStatus: number;
   // 返货每期独立结算：已确认期次的 seq 数组（如 [1,3] 表示第1、3期已确认收货）；老数据空缺
   rebateSettledPeriods?: number[];
   // 返钱分期计划（expenseType=1 且启用计划时有值；totalAmount=计划合计推导）
@@ -218,7 +222,7 @@ export type ExpensePayload = {
   expenseType: ExpenseType;
   item?: string;
   settleMethod?: SettleMethod;
-  settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售强制2）
+  settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售现给/到期给皆可）
   expenseDate: string;
   dueDate?: string;
   totalAmount?: number;
@@ -242,6 +246,8 @@ export type ExpensePayload = {
   consignItems?: ConsignItem[];
   // 寄售到期返货（expenseType=3 & returnType=2）必传：返货商品明细（多行）；后端校验至少 1 行
   consignReturnItems?: ReturnItem[];
+  // 货物处置状态（寄售铺货现给/到期给均带，独立于结算状态）：0=待处置 1=已拉走 2=已续约
+  disposalStatus?: number;
   images?: ExpenseImageDraft[];
   // 返钱分期计划：启用计划时传期次数组（总额由计划合计推导）；关闭计划时传 [] 清空残留
   planJson?: PlanPeriod[];
@@ -314,6 +320,14 @@ export async function createExpense(baseUrl: string, payload: ExpensePayload): P
   return apiJson<SupplierExpense>(baseUrl, '/api/supplier-expenses', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+// 货物处置状态独立更新（独立于结算状态）：PUT /api/supplier-expenses/:id/disposal
+export async function updateDisposalStatus(baseUrl: string, id: number, disposalStatus: number): Promise<SupplierExpense> {
+  return apiJson<SupplierExpense>(baseUrl, `/api/supplier-expenses/${id}/disposal`, {
+    method: 'PUT',
+    body: JSON.stringify({ disposalStatus }),
   });
 }
 
