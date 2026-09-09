@@ -634,7 +634,8 @@ function csvCell(v: any): string {
 // 生成费用单 CSV 文本（含品牌列）。加 UTF-8 BOM，否则 Excel 打开中文会乱码。
 function buildExpenseCsv(list: SupplierExpense[]): string {
   const BOM = '\uFEFF';
-  const header = ['费用单号', '供应商', '品牌', '费用项目', '费用类型', '结算方式', '发生日期', '到期日', '总金额', '已结算', '未结算', '状态'];
+  // 列顺序与 PC 端导出保持一致（含「结算时机」列），避免两份表合并后同一列语义不同
+  const header = ['费用单号', '供应商', '品牌', '费用项目', '费用类型', '结算时机', '结算方式', '发生日期', '到期日', '总金额', '已结算', '未结算', '状态'];
   const lines = [header.map(csvCell).join(',')];
   (list || []).forEach((e) => {
     const isRebate = e.expenseType === 2;
@@ -645,14 +646,24 @@ function buildExpenseCsv(list: SupplierExpense[]): string {
       ? `${Math.max(0, (Number(e.rebateTotalPeriods) || 0) - Math.round(Number(e.settledAmount) || 0))} 期`
       : '长期';
     const unsettled = isRebate ? '' : Math.max(0, (Number(e.totalAmount) || 0) - (Number(e.settledAmount) || 0)).toFixed(2);
+    // 寄售按结算时机区分：现给写「返货/返钱」，到期给写「到期返货/到期返钱」（与 PC 导出列口径一致）
+    const isConsignExp = e.expenseType === 3;
+    const isNowExp = e.settlementTiming === 1;
+    const methodLabel = isRebate
+      ? '返货'
+      : isConsignExp
+        ? (isNowExp ? (e.returnType === 2 ? '返货' : '返钱') : (e.returnType === 2 ? '到期返货' : '到期返钱'))
+        : (SETTLE_METHOD_LABEL[e.settleMethod] || '');
     lines.push([
       e.expenseNo,
       e.supplierName,
       e.brand || '',
       e.item || '',
       EXPENSE_TYPE_LABEL[e.expenseType] || '',
-      // 结算方式：返货 / 寄售到期返货填「返货」（与 PC 导出列口径一致，避免两份表合并后同一列语义不同）
-      nonMoney ? '返货' : (SETTLE_METHOD_LABEL[e.settleMethod] || ''),
+      // 结算时机：寄售按 settlementTiming 区分现给/到期给（与 PC 导出列口径一致）
+      isConsignExp ? (isNowExp ? '现给' : '到期给') : (e.settlementTiming === 2 ? '到期给' : '现给'),
+      // 结算方式：寄售现给写「返货/返钱」、到期给写「到期返货/到期返钱」（与 PC 导出列口径一致）
+      methodLabel,
       e.expenseDate || '',
       nonMoney ? (e.nextRebateDate || '') : (e.dueDate || ''),
       nonMoney ? '' : (Number(e.totalAmount) || 0).toFixed(2),
@@ -820,7 +831,18 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         <InfoRow label="项目" value={e.item || '—'} />
         <InfoRow label="结算时机" value={SETTLEMENT_TIMING_LABEL[(e.settlementTiming || 1) as SettlementTiming]} />
         {e.brand ? <InfoRow label="品牌" value={e.brand} /> : null}
-        <InfoRow label="结算方式" value={isRebateLike ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]} />
+        {/* 结算方式：寄售按结算时机区分「返货/返钱」与「到期返货/到期返钱」，与 PC 详情口径一致 */}
+        <InfoRow
+          label="结算方式"
+          value={
+            isRebate ? '返货'
+              : isConsign
+                ? (e.settlementTiming === 1
+                  ? (e.returnType === 2 ? '返货' : '返钱')
+                  : (e.returnType === 2 ? '到期返货' : '到期返钱'))
+                : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]
+          }
+        />
         <InfoRow label="发生日期" value={e.expenseDate} />
         {!isRebate && e.settleMethod !== 3 ? <InfoRow label="到期日" value={e.dueDate || '—'} /> : null}
         {e.remark ? <InfoRow label="备注" value={e.remark} /> : null}
