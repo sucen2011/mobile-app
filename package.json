@@ -4,6 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "@sucen/ocr-core": "file:vendor/sucen-ocr-core-1.0.2.tgz",
+    "dayjs": "^1.11.23",
     "expo": "^57.0.20",
     "expo-build-properties": "~57.0.17",
     "expo-camera": "~57.0.4",
