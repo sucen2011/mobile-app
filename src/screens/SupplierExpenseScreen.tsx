@@ -1052,8 +1052,9 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       : [blankConsignItem()]
   );
   const [consignMaturity, setConsignMaturity] = useState(e?.maturityDate || '');
-  // 寄售期限预设（0=自定义，其余为月数）：选预设自动算到期日；手动改到期日则回到自定义
-  const [consignTerm, setConsignTerm] = useState<number>(0);
+  // 寄售期限（数量 + 天/月/年）：到期日 = 发生日期 + 期限
+  const [consignTermQty, setConsignTermQty] = useState<number>(6);
+  const [consignTermUnit, setConsignTermUnit] = useState<'day' | 'month' | 'year'>('month');
   const [returnType, setReturnType] = useState<number>(e?.returnType || 1);
   // 货物处置状态（寄售独立字段，0=待处置 1=已拉走 2=已续约），独立于结算状态
   const [disposalStatus, setDisposalStatus] = useState<number>(e?.disposalStatus || 0);
@@ -1139,7 +1140,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     // 切换费用类型时复位结算时机到该类型默认值：寄售/返货→到期给(2)，返钱→现给(1)
     setSettlementTiming(k === 3 ? 2 : (k === 2 ? 2 : 1));
     setProductName(''); setProductId(0);
-    setConsignItems([blankConsignItem()]); setConsignMaturity(''); setReturnType(1);
+    setConsignItems([blankConsignItem()]);
+    if (k === 3 && consignTermQty > 0) {
+      setConsignMaturity(dayjs(expenseDate).add(consignTermQty, consignTermUnit).format('YYYY-MM-DD'));
+    } else {
+      setConsignMaturity('');
+    }
+    setReturnType(1);
     setReturnItems([blankReturnItem()]); setReturnNameFocus(null);
     setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
     setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
@@ -1695,25 +1702,44 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 
 
             <Text style={styles.fieldLabel}>寄售期限</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {([{ v: 3, t: '3个月' }, { v: 6, t: '6个月' }, { v: 9, t: '9个月' }, { v: 12, t: '1年' }, { v: 24, t: '2年' }, { v: 0, t: '自定义' }] as { v: number; t: string }[]).map((o) => (
-                <TouchableOpacity
-                  key={o.v}
-                  style={[styles.segBtn, consignTerm === o.v && styles.segBtnActive]}
-                  onPress={() => {
-                    setConsignTerm(o.v);
-                    if (o.v > 0) {
-                      const d = dayjs().add(o.v, 'month').format('YYYY-MM-DD');
-                      setConsignMaturity(d);
-                    }
-                  }}
-                >
-                  <Text style={[styles.segBtnText, consignTerm === o.v && styles.segBtnTextActive]}>{o.t}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <TextInput
+                style={[styles.input, { flex: 1 }]}
+                value={String(consignTermQty)}
+                {...numInput((v) => {
+                  const qty = Number(v) || 0;
+                  setConsignTermQty(qty);
+                  if (qty > 0) {
+                    setConsignMaturity(dayjs(expenseDate).add(qty, consignTermUnit).format('YYYY-MM-DD'));
+                  }
+                })}
+                placeholder="如 6"
+                placeholderTextColor={theme.color.textAppTertiary}
+              />
+              <View style={[styles.segRow, { flex: 1 }]}>
+                {(['天', '月', '年'] as const).map((u) => {
+                  const unitMap: Record<typeof u, 'day' | 'month' | 'year'> = { 天: 'day', 月: 'month', 年: 'year' };
+                  const unit = unitMap[u];
+                  const active = consignTermUnit === unit;
+                  return (
+                    <TouchableOpacity
+                      key={u}
+                      style={[styles.segBtn, active && styles.segBtnActive]}
+                      onPress={() => {
+                        setConsignTermUnit(unit);
+                        if (consignTermQty > 0) {
+                          setConsignMaturity(dayjs(expenseDate).add(consignTermQty, unit).format('YYYY-MM-DD'));
+                        }
+                      }}
+                    >
+                      <Text style={[styles.segBtnText, active && styles.segBtnTextActive]}>{u}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             </View>
             <Text style={styles.fieldLabel}>{settlementTiming === 1 ? '寄售到期日（货物处置提醒）*' : '寄售到期日 *'}</Text>
-            <DatePickerField value={consignMaturity} onChange={(d: string) => { setConsignMaturity(d); setConsignTerm(0); }} title="寄售到期日" />
+            <DatePickerField value={consignMaturity} onChange={setConsignMaturity} title="寄售到期日" />
 
             {expenseType === 3 && (
               <>
@@ -1823,7 +1849,16 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 
         {/* 发生日期 */}
         <Text style={styles.fieldLabel}>发生日期 *</Text>
-        <DatePickerField value={expenseDate} onChange={setExpenseDate} title="发生日期" />
+        <DatePickerField
+          value={expenseDate}
+          onChange={(d: string) => {
+            setExpenseDate(d);
+            if (expenseType === 3 && consignTermQty > 0) {
+              setConsignMaturity(dayjs(d).add(consignTermQty, consignTermUnit).format('YYYY-MM-DD'));
+            }
+          }}
+          title="发生日期"
+        />
 
         {/* 备注 */}
         <Text style={styles.fieldLabel}>备注</Text>
