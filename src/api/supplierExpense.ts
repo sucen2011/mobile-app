@@ -60,8 +60,8 @@ export const DISPOSAL_STATUS_LABEL: Record<number, string> = { 0: '待处置', 1
 // 走「确认收货 + 期次推进」结算；其余（返钱、寄售到期返钱）走金额结算。
 // 搭配赠送不是返还形式（returnType 只有 1/2），故不在此列。
 // 移动端与后端 seIsRebateLike 共用同一语义，避免两端各写一套导致口径漂移。
-export const isRebateLikeExpense = (e: { expenseType: number; returnType?: number }): boolean =>
-  e.expenseType === 2 || (e.expenseType === 3 && e.returnType === 2);
+export const isRebateLikeExpense = (e?: { expenseType?: number; returnType?: number } | null): boolean =>
+  !!e && (e.expenseType === 2 || (e.expenseType === 3 && e.returnType === 2));
 
 export interface SupplierExpense {
   id: number;
