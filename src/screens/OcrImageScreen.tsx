@@ -14,7 +14,7 @@ import {
 import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
 import { useTheme } from '../theme/ThemeProvider';
 import ScanFrame from '../components/ScanFrame';
-import { apiFetch } from '../api/client';
+import { recognizeOcr } from '../api/ocrCredential';
 import { parseOcrText, type OcrResult, type NutritionItem } from '@sucen/ocr-core';
 import { mockOcr } from '@sucen/ocr-core';
 import { insertOcrCard, listOcrCards, deleteOcrCard, type OcrCard } from '../db/localDb';
@@ -85,29 +85,9 @@ export default function OcrImageScreen({ baseUrl }: Props) {
   const runRecognize = async (dataUrl: string, uri: string) => {
     setRecognizing(true);
     try {
-      const full = /^https?:\/\//.test(baseUrl) ? baseUrl.replace(/\/+$/, '') : `http://${baseUrl.replace(/\/+$/, '')}`;
-      const res = await apiFetch(`${full}/api/ocr/scan`, {
-        method: 'POST',
-        body: JSON.stringify({ data: dataUrl }),
-      });
-      // 先判 HTTP 状态：鉴权失败/未连上服务器必须明确提示，不能再静默走示例数据
-      if (!res.ok) {
-        const reason =
-          res.status === 401
-            ? '未连接店铺服务器或鉴权失败：请在「设置」填入电脑端服务器地址，并确保手机连店铺 WiFi（仅局域网下发接口令牌）。'
-            : res.status === 503
-              ? '数据库启动中，请稍候重试。'
-              : `识别请求被拒绝（HTTP ${res.status}），请确认已连接店铺服务器（含腾讯云密钥的 3001 后端）。`;
-        Alert.alert('识别请求失败', reason);
-        return;
-      }
-      const data = res.json?.data;
-      // 后端业务错误（如腾讯云密钥缺失、识别异常）：HTTP 200 但 code!=0，
-      // 不能再当成「没识别出字」静默走示例数据，必须明确提示。
-      if (res.json && res.json.code && res.json.code !== 0) {
-        Alert.alert('识别失败', res.json.msg || '服务端识别异常，请稍后重试');
-        return;
-      }
+      // 直连腾讯云优先 → 失败回退后端代理（统一入口见 src/api/ocrCredential.ts）
+      const result = await recognizeOcr(dataUrl, baseUrl);
+      const data = result;
       const text = data?.text || '';
       const eng = data?.engine || 'unknown';
       setEngine(eng);

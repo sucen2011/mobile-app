@@ -13,6 +13,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useTheme } from '../theme/ThemeProvider';
 import ScanFrame from '../components/ScanFrame';
 import { apiFetch } from '../api/client';
+import { recognizeOcr } from '../api/ocrCredential';
 import { parseTobaccoPlan, nextPlanNo, type ParsedTobaccoPlan } from '../utils/parseTobaccoPlan';
 
 interface Props {
@@ -58,30 +59,13 @@ export default function TobaccoPlanCreateScreen({ baseUrl, onBack, onSaved }: Pr
 
   // ====== OCR 调用 ======
   const recognizeFromDataUrl = async (dataUrl: string) => {
-    const full = /^https?:\/\//.test(baseUrl) ? baseUrl.replace(/\/+$/, '') : `http://${baseUrl.replace(/\/+$/, '')}`;
     setRecognizing(true);
     setParsedHint('识别中…');
     try {
-      const res = await apiFetch(`${full}/api/ocr/scan`, {
-        method: 'POST',
-        body: JSON.stringify({ data: dataUrl }),
-      });
-      if (!res.ok) {
-        const reason =
-          res.status === 401 ? '未连接店铺服务器或鉴权失败：请在「系统设置」检查店铺地址与 API Token。'
-          : res.status === 503 ? '数据库启动中，请稍候重试。'
-          : `识别请求被拒绝（HTTP ${res.status}），请确认 3001 后端在线。`;
-        Alert.alert('识别请求失败', reason);
-        setParsedHint('');
-        return;
-      }
-      if (res.json && res.json.code && res.json.code !== 0) {
-        Alert.alert('识别失败', res.json.msg || '服务端识别异常');
-        setParsedHint('');
-        return;
-      }
-      const text = (res.json && res.json.data && res.json.data.text) || '';
-      const eng = (res.json && res.json.data && res.json.data.engine) || 'unknown';
+      // 直连腾讯云优先 → 失败回退后端代理（统一入口见 src/api/ocrCredential.ts）
+      const result = await recognizeOcr(dataUrl, baseUrl);
+      const text = result.text;
+      const eng = result.engine;
       if (!text) {
         Alert.alert('未识别到文字', '请重拍：保证对焦清晰、四边对齐、文字可读。');
         setParsedHint('');

@@ -10,7 +10,7 @@ import { useTheme } from '../theme/ThemeProvider';
 import { insertDraft, updateDraft, getDraftById, getCachedPurchases } from '../db/localDb';
 import { DEVICE_ID } from '../config';
 import { fetchSuppliers } from '../api/suppliers';
-import { apiFetch } from '../api/client';
+import { recognizeOcr } from '../api/ocrCredential';
 import { toLocalDateStr } from '../utils/dateLabel';
 import { parsePurchaseBill, matchSupplier } from '@sucen/ocr-core';
 import DatePickerField from '../components/DatePickerField';
@@ -359,29 +359,14 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
     try {
       // 读本地图片为 base64 dataURL：用 Expo FileSystem 读文件 → base64
       const base64 = await readFileAsBase64(uri);
-      const full = /^https?:\/\//.test(baseUrl) ? baseUrl.replace(/\/+$/, '') : `http://${baseUrl.replace(/\/+$/, '')}`;
-      const res = await apiFetch(`${full}/api/ocr/scan`, {
-        method: 'POST',
-        body: JSON.stringify({ data: `data:image/jpeg;base64,${base64}` }),
+      const dataUrl = `data:image/jpeg;base64,${base64}`;
+      // 直连腾讯云优先 → 失败回退后端代理（统一入口见 src/api/ocrCredential.ts）
+      const result = await recognizeOcr(dataUrl, baseUrl).catch((e: any) => {
+        Alert.alert('识别失败', e?.message || '请确认已连接店铺服务器（含腾讯云密钥的 3001 后端）。');
+        return null;
       });
-      // 先判 HTTP 状态：鉴权失败/未连上服务器必须明确提示，不能再和「真没识别出字」混为一谈
-      if (!res.ok) {
-        const reason =
-          res.status === 401
-            ? '未连接店铺服务器或鉴权失败：请在「设置」填入服务器地址，并确保手机连店铺 WiFi（仅局域网下发接口令牌）。'
-            : res.status === 503
-              ? '数据库启动中，请稍候重试。'
-              : `识别请求被拒绝（HTTP ${res.status}），请确认已连接店铺服务器。`;
-        Alert.alert('识别失败', reason);
-        return;
-      }
-      const data = res.json?.data;
-      // 后端业务错误（如腾讯云密钥缺失、识别异常）：HTTP 200 但 code!=0，明确提示而非静默空过。
-      if (res.json && res.json.code && res.json.code !== 0) {
-        Alert.alert('识别失败', res.json.msg || '服务端识别异常，请稍后重试');
-        return;
-      }
-      const text = data?.text || '';
+      if (!result) return;
+      const text = result.text;
       if (!text) {
         Alert.alert('识别完成', '未从照片中识别出文字，请确认单据清晰后重试，或手动录入。');
         return;

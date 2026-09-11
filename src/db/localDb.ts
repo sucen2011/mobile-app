@@ -466,11 +466,11 @@ function ensureCacheTables() {
   );`);
 }
 
-function setMeta(key: string, value: string) {
+export function setMeta(key: string, value: string) {
   getDb().runSync('INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)', [key, value]);
 }
 
-function getMeta(key: string): string | null {
+export function getMeta(key: string): string | null {
   const row = getDb().getFirstSync('SELECT value FROM cache_meta WHERE key=?', [key]) as
     | { value: string }
     | undefined;
