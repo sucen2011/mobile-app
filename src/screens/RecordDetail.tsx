@@ -21,7 +21,6 @@ import {
   getCachedRevenues,
   getDraftById,
   getRevenueDraftById,
-  getDayOffset,
   getCachedCustomChannels,
 } from '../db/localDb';
 import { formatDayLabel } from '../utils/dateLabel';
@@ -291,7 +290,9 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
   const [zoomIndex, setZoomIndex] = useState<number | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const offset = getDayOffset();
+  // 记录详情的日期一律显示「真实日期」：营业日 offset 只用于看板/报表的「昨日」指标聚合
+  // （OverviewScreen / ReportScreen 用 applyDayOffset(today, -offset)），不再用于记录日期展示，
+  // 否则会出现「实际 09-09 的记录显示成 09-10」的多一天问题。
 
   // 三种记录都是同步 DB 读，memo 住是为了给下面的 effect 一个稳定依赖，
   // 否则每次 render 都是新对象引用 → 轮询 effect 无限重挂。
@@ -561,7 +562,7 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
       body = (
         <>
           <Line label="单号" value={`进货草稿 ${draft.orderNo}`} />
-          <Line label="日期" value={formatDayLabel(draft.date, offset)} />
+          <Line label="日期" value={formatDayLabel(draft.date, 0)} />
           <Line label="合计" value={`¥${draft.totalAmount.toFixed(2)}`} color={theme.color.expense} />
           <Line label="已付" value={`¥${Number(draft.paidAmount || 0).toFixed(2)}`} />
           {imagesBlock}
@@ -583,7 +584,7 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
       body = (
         <>
           <Line label="单号" value={`进货单 ${purchase.orderNo}`} />
-          <Line label="日期" value={formatDayLabel(purchase.date, offset)} />
+          <Line label="日期" value={formatDayLabel(purchase.date, 0)} />
           <Line
             label="合计"
             value={`¥${purchase.totalAmount.toFixed(2)}`}
@@ -607,7 +608,7 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
           note: revenueDraft!.note,
           payments: revenueDraft!.payments,
         };
-    title = `营收 ${formatDayLabel(r.date, offset)}${revenueDraft ? ' · 待同步' : ''}`;
+    title = `营收 ${formatDayLabel(r.date, 0)}${revenueDraft ? ' · 待同步' : ''}`;
     const pay = (() => {
       try {
         const v = JSON.parse(r.payments || '{}');
@@ -632,7 +633,7 @@ export default function RecordDetail({ rec, baseUrl, onClose, onEdit }: Props) {
 
     body = (
       <>
-        <Line label="日期" value={formatDayLabel(r.date, offset)} />
+        <Line label="日期" value={formatDayLabel(r.date, 0)} />
         <Line label="现金" value={`¥${Number(pay.cash || 0).toFixed(2)}`} />
         <Line label="微信" value={`¥${Number(pay.wechat || 0).toFixed(2)}`} />
         <Line label="支付宝" value={`¥${Number(pay.alipay || 0).toFixed(2)}`} />
