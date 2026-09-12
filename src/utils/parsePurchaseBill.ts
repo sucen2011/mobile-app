@@ -11,6 +11,8 @@ export interface BillItem {
   quantity?: number;
   price?: number;
   amount?: number;
+  discount?: number;
+  suspect?: boolean;
 }
 
 export interface PurchaseBill {
@@ -291,7 +293,6 @@ function parseTotal(lines: string[]): number | undefined {
 // 条码候选：12 位 UPC-A / 13 位 EAN-13（最常见）。
 // 中国 EAN-13 多 690-695 开头，进口可能 690-699/800-839，不做硬前缀限制（仅"包含"做合理性提示）。
 // 仅用于"本行是否含条码"的快速检测；取值统一走 extractBarcode。
-const BARCODE_RE = /\b\d{12,13}\b/;
 
 /**
  * 从单行（或整段）OCR 文本里抽取商品条码。
@@ -352,20 +353,9 @@ function normalizeOcrName(name: string): string {
 }
 
 // 口味/水果/颜色词：单独出现时可能是「500ml芬达[蜜桃]」被 OCR 拆散后的残片
-const FLAVOR_WORDS = /^(蜜桃|葡萄|西瓜|橙汁|苹果|橙味|葡萄味|西瓜味|蜜桃味|无糖|香草味|原味|柠檬味|橙味)$/;
 
-function scoreName(line: string): number {
-  const clean = line.replace(/[【】\[\]()（）\|｜]/g, '').trim();
-  if (!isProductNameLine(line)) return -1;
-  const base = (clean.match(/[一-龥]/g) || []).length;
-  // 单独口味词得分降低，避免把「蜜桃」「葡萄」等残片当成完整商品名
-  if (FLAVOR_WORDS.test(clean)) return Math.max(0, base - 3);
-  return base;
-}
 
 // 预扫描所有「每页小计/合计/总计」的金额，item 识别时排除这些页级数字
-const TOTAL_LABEL_RE = /(每页小计|本页小计|合计|总计|总金额|总额|成交)/;
-const PURE_MONEY_LINE_RE = /^[¥￥$]?\s*-?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:元)?$/;
 
 // 列式表格：OCR 把横向表格按列拆成每行一个单元格。
 // 表头如「序号 商品编码 商品名称 单位 数量 单价 金额 条形码 辅助数量」，
@@ -518,67 +508,14 @@ function tryParseColumnarTable(lines: string[]): BillItem[] | null {
   return items.length > 0 ? items.slice(0, 50) : null;
 }
 
-function findExcludedTotals(lines: string[]): Set<number> {
-  const set = new Set<number>();
-  const collect = (s: string): boolean => {
-    const matches = s.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g);
-    if (!matches) return false;
-    let got = false;
-    for (const m of matches) {
-      const n = toNum(m);
-      if (n != null && n > 0) {
-        set.add(Number(n.toFixed(2)));
-        got = true;
-      }
-    }
-    return got;
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (!TOTAL_LABEL_RE.test(l)) continue;
-    // 「合计 190.20」同行的情况
-    if (collect(l)) continue;
-    // OCR 竖排单据常把「合计」标签与金额拆成上下两行，向后最多看 6 行补齐
-    for (let j = i + 1; j < lines.length && j <= i + 6; j++) {
-      const nxt = lines[j].trim();
-      if (!nxt) continue;
-      if (BARCODE_RE.test(nxt)) break; // 已进入下一个商品，停
-      if (TOTAL_LABEL_RE.test(nxt)) {
-        collect(nxt);
-        break;
-      }
-      if (PURE_MONEY_LINE_RE.test(nxt)) {
-        collect(nxt);
-        break;
-      }
-      if (/[一-龥]/.test(nxt)) break; // 遇到别的文字行，停
-    }
-  }
-  return set;
-}
 
 // 页脚/合计/页码类行：里面的数字绝不能当成商品金额或数量
-const PAGE_FOOTER_RE = /(每页小计|本页小计|小计|合计|总计|页码|第\s*\d+\s*页|\d+\s*\/\s*\d+\s*页|页共|共\s*\d+\s*页)/;
-const PAGE_NUMBER_RE = /^第?\s*\d+\s*[\/-]?\s*\d*\s*页$/;
 
 // 判断两位小数金额是否被中文粘连（如"1.25可口可乐"里的 1.25 不是金额）
-function isNumberAdjacentToHan(line: string, numStr: string): boolean {
-  const idx = line.indexOf(numStr);
-  if (idx < 0) return false;
-  const before = idx > 0 ? line[idx - 1] : '';
-  const after = line[idx + numStr.length] || '';
-  return /[一-龥]/.test(before) || /[一-龥]/.test(after);
-}
 
 const UNIT_RE = /^(\d+(?:\.\d+)?)\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/;
 
 // 组合表头行（如「条码 商品名称 数量 单价 金额」）：整行都是列名，绝不能当商品名
-const COLUMN_HEADER_WORD = /^(规格|建议零售价|零售价|单价|金额|总价|小计|数量|单位|件数|条码|商品条码|商品名称|品名|名称|货品|货名|产品名称|项目|序号|编号|备注|价格|条形码|批号|生产日期|保质期|折扣|折扣率|税率|税额|库存|进价|售价)$/;
-function isColumnHeaderLine(line: string): boolean {
-  const tokens = line.trim().split(/[\s|｜/、,，]+/).filter(Boolean);
-  if (tokens.length < 2) return false;
-  return tokens.every((t) => COLUMN_HEADER_WORD.test(t));
-}
 
 /**
  * 横向表格的「整行商品」解析：一行里同时含条码、名称和尾部数字列。
@@ -694,326 +631,189 @@ function stripBarcodeFromName(line: string, barcode?: string): string {
   return n;
 }
 
-function parseItems(lines: string[]): BillItem[] {
-  // 真实手机拍摄的多联销售单通常是"竖排表格"：每个商品的数据分散在条码前后多行。
-  // 策略：以条码为锚点，全局分配「离条码最近的带单位数量 / 两位小数金额 / 商品名」，
-  // 再用 q*p≈amount 或 amount/quantity 反推单价。对非竖排表格 fallback 到旧合并逻辑。
+function splitStuckBarcode(text: string): { barcode: string; name: string } | null {
+  // 真实针式打印单：条码常与名称粘连成 14~18 位长数字串（如 "6906151624079500ml牛栏山..."）。
+  // 确定性拆分：在任一数字串里枚举「行号前缀 L∈{0,1,2} + 13 位窗口」，取以 '69' 开头的窗口为条码，
+  // 剩余部分(含名称)作为名称候选。中国 EAN-13 必以 69 开头，该约束已足够唯一。
+  const runs = Array.from(text.matchAll(/\d+/g));
+  for (const m of runs) {
+    const runStr = m[0];
+    if (runStr.length < 13) continue;
+    for (let L = 0; L <= runStr.length - 13; L++) {
+      const w = runStr.slice(L, L + 13);
+      if (w[0] !== '6' || w[1] !== '9') continue;
+      const start = m.index ?? 0;
+      const before = text.slice(0, start);
+      const after = text.slice(start + runStr.length);
+      let beforeClean = before;
+      // 行号单独成行、或与条码同行(如 "10 690...")：条码前的纯数字行号去掉，名称里的数字保留
+      if (!/[一-龥]/.test(beforeClean)) beforeClean = beforeClean.replace(/^\d{1,2}\s+/, '');
+      const afterDigits = runStr.slice(L + 13);
+      const name = (beforeClean + afterDigits + after).trim();
+      return { barcode: w, name };
+    }
+  }
+  return null;
+}
 
-  // 先尝试识别「列式表格」：OCR 把横向表格按列拆成每行一个单元格
-  // （序号/商品编码/名称/单位/数量/单价/金额/条码/辅助数量 各占一行）。
-  // 这种格式下原来的"以条码为锚点"逻辑会误把合计大写金额当商品名、把单价当金额。
+function parseItems(lines: string[]): BillItem[] {
+  // 真实针式销售单：表格被拆成碎片行。以「条码」为锚点，把后续碎片(规格/数量/单价/优惠/金额/名称续行)
+  // 归并到最近锚点，直到下一个锚点。无锚点时退回列式/兜底解析，保证旧版式不退化。
   const columnar = tryParseColumnarTable(lines);
   if (columnar && columnar.length > 0) return columnar;
 
-  const excludedTotals = findExcludedTotals(lines);
-  const barcodeIdxs: number[] = [];
-  lines.forEach((l, i) => { if (BARCODE_RE.test(l)) barcodeIdxs.push(i); });
-
-  if (barcodeIdxs.length === 0) return parseItemsFallback(lines);
-
-  // 全局提取带单位数量，按最近条码分配（每数量只用一次）
-  // 数量在 OCR 中常有三种形态：
-  //   1) 同行 "6 袋"
-  //   2) 拆行 "6\n袋"（允许间隔最多 3 行，应对针式打印单列错位）
-  //   3) 三数字行 "6 2.20 13.20"
-  const quantityCandidates: { idx: number; quantity: number; unit?: string }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (BARCODE_RE.test(trimmed)) continue;
-    // 同行：如 "6 袋"
-    const m = trimmed.match(UNIT_RE);
-    if (m) {
-      quantityCandidates.push({ idx: i, quantity: Number(m[1]), unit: m[2] });
-      continue;
-    }
-    // 拆行：当前行是单独整数，其后 3 行内出现独立单位词
-    if (/^\d+$/.test(trimmed) && i + 1 < lines.length) {
-      let foundUnit: string | undefined;
-      for (let k = 1; k <= 3 && i + k < lines.length; k++) {
-        const next = lines[i + k].trim();
-        if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/.test(next)) {
-          foundUnit = next;
-          break;
-        }
-        // 撞到条码/名称/规格/辅助数量/页脚就停
-        if (
-          BARCODE_RE.test(next) ||
-          /[一-龥]{2,}/.test(next) ||
-          /^\d+(?:\s*[*xX×]\s*\d+)+$/.test(next) ||
-          /^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)/.test(next) ||
-          PAGE_FOOTER_RE.test(next) ||
-          PAGE_NUMBER_RE.test(next)
-        )
-          break;
-      }
-      if (foundUnit) {
-        quantityCandidates.push({ idx: i, quantity: Number(trimmed), unit: foundUnit });
-        continue;
-      }
-    }
-    // 无单位的数值行：如 "6 2.20 13.20" / "20 1.50 30.00"，第一个整数就是数量
-    const numLine = trimmed.match(/^(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/);
-    if (numLine) {
-      quantityCandidates.push({ idx: i, quantity: Number(numLine[1]) });
-    }
-  }
-
-  const assignedQty = new Map<number, number>(); // barcodeIdx -> quantity
-  const assignedUnit = new Map<number, string>(); // barcodeIdx -> unit
-  const usedQtyIdx = new Set<number>();
-  // 辅助数量常见形式：「1包 / 1盒 / 5袋（表示一箱内含）」；在主数量列附近出现时会抢主数量。
-  const isAuxQty = (cand: { quantity: number; unit?: string }) =>
-    cand.quantity === 1 && /^(包|盒|箱)$/.test(cand.unit || '');
-  for (const bcIdx of barcodeIdxs) {
-    let best: { idx: number; quantity: number; unit?: string; dist: number } | undefined;
-    for (let q = 0; q < quantityCandidates.length; q++) {
-      if (usedQtyIdx.has(q)) continue;
-      const cand = quantityCandidates[q];
-      const dist = Math.abs(cand.idx - bcIdx);
-      if (dist > 14) continue;
-      if (!best) {
-        best = { idx: q, quantity: cand.quantity, unit: cand.unit, dist };
-      } else if (dist < best.dist) {
-        best = { idx: q, quantity: cand.quantity, unit: cand.unit, dist };
-      } else if (dist === best.dist) {
-        // 距离相同时，优先非辅助数量；再优先数量更合理的（5 比 50 更像主数量）
-        const candAux = isAuxQty(cand) ? 0 : 1;
-        const bestAux = isAuxQty(best) ? 0 : 1;
-        if (candAux > bestAux) {
-          best = { idx: q, quantity: cand.quantity, unit: cand.unit, dist };
-        } else if (candAux === bestAux && cand.quantity < best.quantity) {
-          best = { idx: q, quantity: cand.quantity, unit: cand.unit, dist };
-        }
-      }
-    }
-    if (best) {
-      assignedQty.set(bcIdx, best.quantity);
-      if (best.unit) assignedUnit.set(bcIdx, best.unit);
-      usedQtyIdx.add(best.idx);
-    }
-  }
-
-  // 补充：单独成行的单位词（如 "袋" / "盒" / "根"）按最近 barcode 分配
-  const unitWords: { idx: number; unit: string }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/.test(t)) {
-      unitWords.push({ idx: i, unit: t });
-    }
-  }
-  for (const bcIdx of barcodeIdxs) {
-    if (assignedUnit.has(bcIdx)) continue;
-    let best: { idx: number; unit: string; dist: number } | undefined;
-    for (const uw of unitWords) {
-      const dist = Math.abs(uw.idx - bcIdx);
-      if (dist > 10) continue;
-      if (!best || dist < best.dist) best = { ...uw, dist };
-    }
-    if (best) assignedUnit.set(bcIdx, best.unit);
-  }
-
-  // 按条码区间提取「金额」：每行可能有多个两位小数（单价、金额），
-  // 在同一区间内取最大者作为金额，避免把 2.20 当成 13.20 误分配。
-  const assignedAmt = new Map<number, number>(); // barcodeIdx -> amount
-  for (let k = 0; k < barcodeIdxs.length; k++) {
-    const bcIdx = barcodeIdxs[k];
-    const prevBc = barcodeIdxs[k - 1] ?? -1;
-    const nextBc = barcodeIdxs[k + 1] ?? lines.length;
-    // 按条码区间提取「金额」：先收集候选数字（整数/小数都可能），
-    // 结合已分配的数量用 q*p≈a 选取最合理的金额；验证失败时回退到「带小数优先的最大候选」。
-    let bestAmount: number | undefined;
-    let amountCandidates: number[] = [];
-    // 默认只在当前条码区间内找金额，避免串到下一商品。
-    const collectAmounts = (from: number, to: number) => {
-      const list: number[] = [];
-      for (let i = from; i < to && i < lines.length; i++) {
-        const line = lines[i];
-        if (PAGE_FOOTER_RE.test(line) || PAGE_NUMBER_RE.test(line.trim())) break;
-        const trimmed = line.trim();
-        if (BARCODE_RE.test(trimmed)) continue;
-        if (/^\d+(?:\s*[*xX×]\s*\d+)+$/.test(trimmed)) continue; // 规格如 1*40
-        const matches = trimmed.match(/\b\d+(?:\.\d{1,2})?\b/g);
-        if (!matches) continue;
-        for (const m of matches) {
-          if (isNumberAdjacentToHan(trimmed, m)) continue;
-          const n = Number(m);
-          if (excludedTotals.has(n)) continue;
-          if (n === assignedQty.get(bcIdx)) continue;
-          if (n > 100000) continue;
-          list.push(n);
-        }
-      }
-      return list;
-    };
-    amountCandidates = collectAmounts(bcIdx + 1, nextBc);
-    // 若当前区间内找不到可信金额（OCR 列错位常见），再往前多看 5 行兜底。
-    if (amountCandidates.length === 0) {
-      amountCandidates = collectAmounts(Math.max(prevBc + 1, bcIdx - 5), nextBc);
-    }
-
-    const q = assignedQty.get(bcIdx);
-    if (q != null) {
-      // 优先找 q * price ≈ amount 的组合，取最大金额
-      let bestPair: { amount: number; price: number } | null = null;
-      for (const a of amountCandidates) {
-        for (const p of amountCandidates) {
-          if (Math.abs(p * q - a) < 0.01) {
-            if (!bestPair || a > bestPair.amount) bestPair = { amount: a, price: p };
-          }
-        }
-      }
-      if (bestPair) bestAmount = bestPair.amount;
-    }
-    if (bestAmount == null) {
-      // fallback：带小数优先的最大候选
-      let hasDecimal = false;
-      for (const n of amountCandidates) {
-        const isDecimal = !Number.isInteger(n);
-        if (
-          bestAmount == null ||
-          (isDecimal && !hasDecimal) ||
-          (isDecimal === hasDecimal && n > bestAmount)
-        ) {
-          bestAmount = n;
-          hasDecimal = hasDecimal || isDecimal;
-        }
-      }
-    }
-    if (bestAmount != null) assignedAmt.set(bcIdx, bestAmount);
-  }
+  const anchors: { idx: number; barcode: string; name: string }[] = [];
+  lines.forEach((l, i) => {
+    const s = splitStuckBarcode(l);
+    if (s) anchors.push({ idx: i, barcode: s.barcode, name: s.name });
+  });
+  if (anchors.length === 0) return parseItemsFallback(lines);
 
   const items: BillItem[] = [];
-  for (let k = 0; k < barcodeIdxs.length; k++) {
-    const bcIdx = barcodeIdxs[k];
-    const prevBc = barcodeIdxs[k - 1] ?? -1;
-    const nextBc = barcodeIdxs[k + 1] ?? lines.length;
+  let gapNames: string[] = []; // 上一锚点已闭合、却出现在条码行之前的纯名称行，留给下一锚点
 
-    const barcode = extractBarcode(lines[bcIdx]);
+  for (let k = 0; k < anchors.length; k++) {
+    const a = anchors[k];
+    const nextIdx = k + 1 < anchors.length ? anchors[k + 1].idx : lines.length;
+    const block = lines.slice(a.idx + 1, nextIdx);
 
-    // 横向表格：一行内已包含名称与数量/单价/金额，直接行内解析，不参与竖排分配
-    const inline = parseInlineRow(lines[bcIdx], barcode);
-    if (inline) {
-      const inlineName = normalizeOcrName(cleanName(stripBarcodeFromName(inline.name, barcode)));
-      if (inlineName) {
-        items.push({
-          name: inlineName,
-          barcode: barcode || '',
-          unit: inline.unit,
-          quantity: inline.quantity,
-          price: inline.price,
-          amount: inline.amount,
-        });
+    // 单行整行商品(名称+数量+单价同在锚点行)：交给行内解析，不参与竖排归并
+    const inline = parseInlineRow(lines[a.idx], a.barcode);
+    if (inline && inline.name) {
+      items.push({
+        name: normalizeOcrName(cleanName(inline.name)),
+        barcode: a.barcode,
+        unit: inline.unit,
+        quantity: inline.quantity,
+        price: inline.price,
+        amount: inline.amount,
+      });
+      gapNames = [];
+      continue;
+    }
+
+    let qty: number | undefined;
+    let unit: string | undefined;
+    const decimals: { v: number; i: number }[] = [];
+    let gift = false;
+    const nameFrags: string[] = [];
+    const trailingNames: string[] = [];
+    let closed = false;
+
+    for (let bi = 0; bi < block.length; bi++) {
+      const line = block[bi].trim();
+      if (!line) continue;
+      if (/赠品|赠送|搭赠| Free |FREE/.test(line)) {
+        gift = true;
+        closed = true;
         continue;
       }
-    }
-
-    // 名称：在本条码区间内找离条码最近且中文足够多的行
-    // 先剥掉本行/候选行里粘着的条码，避免「694018888 E61甘源」把货号一起带进名称。
-    let bestName = '';
-    let bestDist = Infinity;
-    for (let i = prevBc + 1; i < nextBc && i < lines.length; i++) {
-      if (isColumnHeaderLine(lines[i])) continue;
-      const candidate = stripBarcodeFromName(lines[i], barcode);
-      const score = scoreName(candidate);
-      if (score < 2) continue;
-      const dist = Math.abs(i - bcIdx);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestName = normalizeOcrName(cleanName(candidate));
+      // 数量+单位(精确 "N箱")
+      const um = line.match(UNIT_RE);
+      if (um && qty === undefined) {
+        qty = Number(um[1]);
+        unit = um[2];
+        continue;
       }
-    }
-    if (!bestName) continue;
-
-    let amount = assignedAmt.get(bcIdx);
-    let quantity = assignedQty.get(bcIdx);
-
-    // 收集条码附近的数字用于 q*p 反推；从本商品条码行开始，避免上一个商品尾行污染。
-    const nums: number[] = [];
-    for (let i = bcIdx; i < nextBc && i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      if (PAGE_FOOTER_RE.test(trimmed) || PAGE_NUMBER_RE.test(trimmed)) continue;
-      if (BARCODE_RE.test(trimmed)) continue;
-      if (/^\d+(?:\s*[*xX×]\s*\d+)+$/.test(trimmed)) continue;
-      if (isProductNameLine(lines[i])) continue;
-      if (/[一-龥]/.test(trimmed) && !/^\d+(?:\.\d+)?\s*(?:箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)?$/.test(trimmed)) continue;
-      const matches = trimmed.match(/-?\d+(?:\.\d+)?/g);
-      if (matches) {
-        for (const m of matches) {
-          const n = Number(m);
-          if (Number.isFinite(n) && n > 0 && n < 100000) nums.push(n);
+      // 数量行粘连 "N箱 单价 优惠"
+      const qpd = line.match(/^(\d+)\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)\s*(\d+\.\d{1,2})\s+(\d+\.\d{1,2})$/);
+      if (qpd) {
+        if (qty === undefined) {
+          qty = Number(qpd[1]);
+          unit = qpd[2];
         }
+        decimals.push({ v: Number(qpd[3]), i: a.idx + 1 + bi });
+        decimals.push({ v: Number(qpd[4]), i: a.idx + 1 + bi });
+        continue;
+      }
+      // "数量 单价 金额" 竖排(测试样本)
+      const npa = line.match(/^(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$/);
+      if (npa) {
+        if (qty === undefined) qty = Number(npa[1]);
+        decimals.push({ v: Number(npa[2]), i: a.idx + 1 + bi });
+        decimals.push({ v: Number(npa[3]), i: a.idx + 1 + bi });
+        continue;
+      }
+      // 纯数字行(金额/单价/两段粘连 "9.500.02")
+      const allDec = line.match(/\d+\.\d{1,2}/g);
+      if (allDec && /^[¥￥$\s\d.,]+$/.test(line) && !/(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)/.test(line)) {
+        for (const d of allDec) decimals.push({ v: Number(d), i: a.idx + 1 + bi });
+        continue;
+      }
+      // 规格行 "1*12"
+      if (/^\d+\s*[.*xX×]\s*\d+$/.test(line)) continue;
+      // 名称续行：上一锚点已闭合、且本行紧贴下一锚点 → 留给下一锚点
+      if (isProductNameLine(line)) {
+        if (closed && nextIdx - (a.idx + 1 + bi) <= 1) trailingNames.push(line);
+        else nameFrags.push(line);
+        continue;
+      }
+      // 其余含数字的行，尽力抽取小数(如 "名称 57.00")
+      if (allDec) {
+        for (const d of allDec) decimals.push({ v: Number(d), i: a.idx + 1 + bi });
       }
     }
-    const safeNums = nums.filter((n) => !excludedTotals.has(Number(n.toFixed(2))));
 
+    // 优惠：归并块中 >0 且 <1 的最小小数(典型 0.01~0.19)
+    const discountCandidates = decimals.filter((d) => d.v > 0 && d.v < 1);
+    let discount: number | undefined;
+    if (discountCandidates.length > 0) {
+      discount = discountCandidates.map((d) => d.v).sort((x, y) => x - y)[0];
+    }
+    const valueDecimals = decimals.filter((d) => !(discount != null && Math.abs(d.v - discount) < 1e-9));
     let price: number | undefined;
-    if (amount != null) {
-      const amt = amount;
-      if (quantity != null) {
-        const qtt = quantity;
-        const exact = safeNums.find((p) => Math.abs(p * qtt - amt) < 0.01);
-        price = exact != null ? exact : Number((amt / qtt).toFixed(4));
-      } else {
-        let best: { q: number; p: number; score: number } | null = null;
-        for (let i = 0; i < safeNums.length; i++) {
-          for (let j = 0; j < safeNums.length; j++) {
-            if (i === j) continue;
-            const q = safeNums[i];
-            const p = safeNums[j];
-            if (Math.abs(q * p - amt) < 0.01) {
-              let score = 0;
-              if (Number.isInteger(q)) score += 100; // 数量优先为整数
-              if (!Number.isInteger(p)) score += 10;  // 单价优先带小数
-              if (q > 10 && p < 20) score += 1;        // 批发规格轻微偏好
-              if (!best || score > best.score) best = { q, p, score };
-            }
-          }
-        }
-        if (best) {
-          quantity = best.q;
-          price = best.p;
-        }
-      }
-    } else if (quantity != null) {
-      // 金额缺失时（常见整数金额如 27/30/45），在 nearby nums 中找 q*p≈a，优先最大的 a
-      let best: { p: number; a: number; score: number } | null = null;
-      for (const p of safeNums) {
-        for (const a of safeNums) {
-          if (Math.abs(p * quantity - a) < 0.01) {
-            let score = 0;
-            if (!Number.isInteger(p)) score += 10; // 单价优先带小数
-            score += a; // 金额越大越优先（避免把规格小数字当金额）
-            if (!best || score > best.score) best = { p, a, score };
-          }
-        }
-      }
-      if (best) {
-        price = best.p;
-        amount = best.a;
-      } else {
-        // 兜底：找一个非整数单价反推金额
-        const priceCandidates = safeNums.filter((n) => n >= 0.1 && n <= 500 && !Number.isInteger(n));
-        if (priceCandidates.length > 0) {
-          price = priceCandidates[0];
-          amount = Number((price * quantity).toFixed(4));
+    let amount: number | undefined;
+    if (valueDecimals.length > 0) {
+      valueDecimals.sort((x, y) => x.i - y.i);
+      amount = valueDecimals[valueDecimals.length - 1].v;
+      price = valueDecimals[0].v;
+      if (valueDecimals.length === 1) amount = price = valueDecimals[0].v;
+    }
+
+    // 赠品 / 金额为 0：单价金额归零
+    if (gift || (amount === 0 && price === 0)) {
+      price = 0;
+      amount = 0;
+    }
+
+    // 名称：gap(条码前的纯名称) + 锚点行名称 + 名称续行
+    let name = [gapNames.join(' '), a.name, nameFrags.join(' '), trailingNames.join(' ')]
+      .filter((s) => s && s.trim())
+      .join(' ')
+      .trim();
+    name = normalizeOcrName(cleanName(name));
+
+    // 校验：|数量×单价−优惠−金额| > 0.5 → 反推单价，仍不符则标 suspect
+    let suspect = false;
+    if (qty != null && qty !== 0 && price != null && amount != null) {
+      const diff = Math.abs(qty * price - (discount ?? 0) - amount);
+      if (diff > 0.5) {
+        if (discount != null) {
+          const rp = Math.round(((amount + discount) / qty) * 100) / 100;
+          if (rp > 0) price = rp;
+          suspect = Math.abs(qty * price - discount - amount) > 0.5;
+        } else {
+          suspect = true;
         }
       }
     }
 
-    if (quantity == null) {
-      const intCandidates = safeNums.filter((n) => n > 0 && n < 1000 && Number.isInteger(n) && String(n) !== barcode && !excludedTotals.has(n));
-      if (intCandidates.length > 0) quantity = Math.min(...intCandidates);
-    }
+    const item: BillItem = {
+      name,
+      barcode: a.barcode,
+      unit,
+      quantity: qty,
+      price,
+      amount,
+    };
+    if (discount != null && discount > 0) item.discount = discount;
+    if (suspect) item.suspect = true;
+    items.push(item);
 
-    if (price == null && amount != null && quantity != null && quantity !== 0) {
-      price = Number((amount / quantity).toFixed(4));
-    }
-
-    items.push({ name: bestName, barcode: barcode || '', unit: assignedUnit.get(bcIdx), quantity, price, amount });
+    gapNames = trailingNames.slice();
   }
 
-  if (items.length > 0) return items.slice(0, 50);
-  return parseItemsFallback(lines);
+  return items.length > 0 ? items.slice(0, 50) : parseItemsFallback(lines);
 }
 
 function parseItemsFallback(lines: string[]): BillItem[] {
