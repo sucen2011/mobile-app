@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert, TextInput,
   Switch, Modal, Image, RefreshControl, Share, ActivityIndicator, Platform,
@@ -993,6 +993,24 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
 
   // 供应商（FIX：始终受控写入 state，校验从 state 读取）
   const [supplierName, setSupplierName] = useState(e?.supplierName || '');
+  // 供应商候选：远程 /api/suppliers + 本地 SQLite suppliers 表，合并去重（无截断，全量展示）
+  const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
+  const [supplierPickerOpen, setSupplierPickerOpen] = useState(false);
+  const [supplierQuery, setSupplierQuery] = useState('');
+  useEffect(() => {
+    (async () => {
+      const names: string[] = [];
+      try { names.push(...(await fetchSuppliers(baseUrl))); } catch { /* 离线回退 */ }
+      try { names.push(...listSuppliers().map((s) => s.name).filter(Boolean)); } catch { /* ignore */ }
+      setSupplierOptions(Array.from(new Set(names.filter(Boolean))));
+    })();
+  }, [baseUrl]);
+  // 主输入框联想：输入关键字时过滤候选（排除已精确匹配的当前值）
+  const supplierSuggestions = useMemo(() => {
+    const q = supplierName.trim().toLowerCase();
+    if (!q) return [];
+    return supplierOptions.filter((n) => n.toLowerCase().includes(q) && n.toLowerCase() !== q).slice(0, 8);
+  }, [supplierName, supplierOptions]);
   const [expenseType, setExpenseType] = useState<ExpenseType>(e?.expenseType || 1);
   const [item, setItem] = useState(e?.item || '');
   const [settleMethod, setSettleMethod] = useState<SettleMethod>(e?.settleMethod || 3);
@@ -1005,6 +1023,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
   // 返钱分期计划（与 PC 端结算计划段对齐；planAmount 草稿期允许字符串，提交时强转数字）
   const [planMode, setPlanMode] = useState<boolean>(Array.isArray(e?.planJson) && e!.planJson.length > 0);
+  // 当前计划模板类型：equal/quarterly/seasonal/custom；custom 跳过自动重算，其余随参数联动
+  const [planTemplate, setPlanTemplate] = useState<string>('');
   const [planList, setPlanList] = useState<any[]>(Array.isArray(e?.planJson) ? e!.planJson.map((p: PlanPeriod) => ({ ...p })) : []);
   const [peakAmt, setPeakAmt] = useState('200');
   const [offAmt, setOffAmt] = useState('100');
@@ -1080,25 +1100,14 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const [permission, requestPermission] = useCameraPermissions();
   const camRef = React.useRef<any>(null);
 
-  const pickSupplier = async () => {
-    let names: string[] = [];
-    try {
-      const remote = await fetchSuppliers(baseUrl);
-      names = names.concat(remote);
-    } catch { /* 离线回退 */ }
-    try {
-      const local = listSuppliers().map((s) => s.name).filter(Boolean);
-      names = names.concat(local as string[]);
-    } catch { /* ignore */ }
-    names = Array.from(new Set(names.filter(Boolean)));
-    if (names.length === 0) {
+  // 打开供应商选择弹层（自定义可滚动 Modal，替代原生 Alert 多按钮选择器，避免长列表卡死）
+  const openSupplierPicker = () => {
+    if (supplierOptions.length === 0) {
       Alert.alert('选择供应商', '暂无供应商，请先在电脑端维护后同步，或手动输入');
       return;
     }
-    Alert.alert('选择供应商', undefined, [
-      ...names.map((n) => ({ text: n, onPress: () => setSupplierName(n) })),
-      { text: '手动输入', onPress: () => {}, style: 'cancel' as const },
-    ]);
+    setSupplierQuery('');
+    setSupplierPickerOpen(true);
   };
 
   const openCamera = async () => {
@@ -1283,8 +1292,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const clampMonth = (v: string) => Math.min(12, Math.max(1, Math.floor(Number(v) || 1)));
   const planCountNum = () => Math.min(60, Math.max(1, Math.floor(Number(planCount) || 12)));
 
-  // 旺季淡季：自定义期数 / 起始年月 / 旺季月份，支持跨年
-  const genSeasonal = () => {
+  // 旺季淡季：自定义期数 / 起始年月 / 旺季月份，支持跨年（纯构建，不弹窗）
+  const buildSeasonal = (): any[] => {
     const peak = Number(peakAmt.replace(/[^0-9.]/g, '')) || 0;
     const off = Number(offAmt.replace(/[^0-9.]/g, '')) || 0;
     const list: any[] = [];
@@ -1300,13 +1309,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       });
       m += 1; if (m > 12) { m = 1; y += 1; }
     }
-    setPlanList(list);
+    return list;
   };
 
   // 按月均摊：按费用总额 N 期等额（末期补差）
-  const genEqualMonthly = () => {
+  const buildEqualMonthly = (): any[] | null => {
     const total = Number(amount.replace(/[^0-9.]/g, '')) || 0;
-    if (total <= 0) { Alert.alert('请先填写费用总额', '按月均摊模板需要先填「费用总额（元）」'); return; }
+    if (total <= 0) return null;
     const count = planCountNum();
     const base = fmtMoney(total / count);
     const list: any[] = [];
@@ -1317,13 +1326,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·均摊`, status: 0, settledAmount: 0, settledDate: null, images: [] });
       m += 1; if (m > 12) { m = 1; y += 1; }
     }
-    setPlanList(list);
+    return list;
   };
 
   // 按季：4 个季度等额（末期补差）
-  const genQuarterly = () => {
+  const buildQuarterly = (): any[] | null => {
     const total = Number(amount.replace(/[^0-9.]/g, '')) || 0;
-    if (total <= 0) { Alert.alert('请先填写费用总额', '按季模板需要先填「费用总额（元）」'); return; }
+    if (total <= 0) return null;
     const base = fmtMoney(total / 4);
     const list: any[] = [];
     let y = Number(planYear) || new Date().getFullYear();
@@ -1333,8 +1342,29 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·季度返`, status: 0, settledAmount: 0, settledDate: null, images: [] });
       m += 3; if (m > 12) { m -= 12; y += 1; }
     }
-    setPlanList(list);
+    return list;
   };
+
+  // 模板动作（点击快速模板）：生成计划并记录当前模板类型
+  const genSeasonal = () => { setPlanList(buildSeasonal()); setPlanTemplate('seasonal'); };
+  const genEqualMonthly = () => {
+    const l = buildEqualMonthly();
+    if (!l) { Alert.alert('请先填写费用总额', '按月均摊模板需要先填「费用总额（元）」'); return; }
+    setPlanList(l); setPlanTemplate('equal');
+  };
+  const genQuarterly = () => {
+    const l = buildQuarterly();
+    if (!l) { Alert.alert('请先填写费用总额', '按季模板需要先填「费用总额（元）」'); return; }
+    setPlanList(l); setPlanTemplate('quarterly');
+  };
+
+  // 计划表联动（对应 PC 端 planTemplate 自动重算）：参数变化且处于某模板时按模板重算；custom 模式跳过，保留手动编辑
+  useEffect(() => {
+    if (!planMode || !planTemplate || planTemplate === 'custom') return;
+    if (planTemplate === 'equal') { const l = buildEqualMonthly(); if (l) setPlanList(l); }
+    else if (planTemplate === 'quarterly') { const l = buildQuarterly(); if (l) setPlanList(l); }
+    else if (planTemplate === 'seasonal') { setPlanList(buildSeasonal()); }
+  }, [planMode, planTemplate, amount, planYear, planCount, planStartMonth, peakAmt, offAmt, peakMonths]);
 
   const addPlanRow = () => setPlanList((prev) => [...prev, { seq: prev.length + 1, planDate: '', planAmount: '', remark: '', status: 0, settledAmount: 0, settledDate: null, images: [] }]);
   const updatePlanRow = (seq: number, patch: any) => setPlanList((prev) => prev.map((p) => (p.seq === seq ? { ...p, ...patch } : p)));
@@ -1358,7 +1388,16 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           style={styles.input} value={supplierName} onChangeText={setSupplierName}
           placeholder="输入供应商名，或点右侧选择" placeholderTextColor={theme.color.textAppTertiary}
         />
-        <TouchableOpacity style={styles.pickerField} onPress={pickSupplier}>
+        {supplierSuggestions.length > 0 ? (
+          <View style={styles.suggestBox}>
+            {supplierSuggestions.map((n) => (
+              <TouchableOpacity key={n} style={styles.suggestItem} onPress={() => setSupplierName(n)} activeOpacity={0.7}>
+                <Text style={styles.suggestText}>{n}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+        <TouchableOpacity style={styles.pickerField} onPress={openSupplierPicker}>
           <Text style={[styles.pickerText, { color: theme.color.textAppTertiary }]}>从已有供应商中选择</Text>
           <Text style={styles.pickerArrow}>›</Text>
         </TouchableOpacity>
@@ -1416,7 +1455,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   <TouchableOpacity style={[styles.segBtn, !planMode && styles.segBtnActive]} onPress={() => setPlanMode(false)}>
                     <Text style={[styles.segBtnText, !planMode && styles.segBtnTextActive]}>一次性结清</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.segBtn, planMode && styles.segBtnActive]} onPress={() => { setPlanMode(true); if (planList.length === 0) genSeasonal(); }}>
+                  <TouchableOpacity style={[styles.segBtn, planMode && styles.segBtnActive]} onPress={() => { setPlanMode(true); genSeasonal(); }}>
                     <Text style={[styles.segBtnText, planMode && styles.segBtnTextActive]}>按计划分期</Text>
                   </TouchableOpacity>
                 </View>
@@ -1455,7 +1494,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   <TouchableOpacity style={styles.chip} onPress={genEqualMonthly}><Text style={styles.chipText}>按月均摊</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.chip} onPress={genQuarterly}><Text style={styles.chipText}>按季</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.chip} onPress={genSeasonal}><Text style={styles.chipText}>旺季淡季</Text></TouchableOpacity>
-                  <TouchableOpacity style={styles.chip} onPress={() => setPlanList([])}><Text style={styles.chipText}>自定义</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.chip} onPress={() => { setPlanList([]); setPlanTemplate('custom'); }}><Text style={styles.chipText}>自定义</Text></TouchableOpacity>
                 </View>
 
                 <View style={styles.dualRow}>
@@ -1903,6 +1942,50 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           {previewUri ? (
             <Image source={{ uri: previewUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
           ) : null}
+        </View>
+      </Modal>
+
+      {/* 供应商选择：可滚动弹层，替代原生 Alert 多按钮选择器（避免长列表溢出无法关闭 / 整页卡死） */}
+      <Modal
+        visible={supplierPickerOpen}
+        animationType="slide"
+        onRequestClose={() => setSupplierPickerOpen(false)}
+      >
+        <View style={styles.pickerModalRoot}>
+          <SafeAreaHeader style={styles.header}>
+            <TouchableOpacity style={styles.backBtn} onPress={() => setSupplierPickerOpen(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.backText}>✕</Text>
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>选择供应商</Text>
+            <View style={styles.subSpacer} />
+          </SafeAreaHeader>
+          <View style={styles.pickerSearchWrap}>
+            <TextInput
+              style={styles.pickerSearchInput}
+              value={supplierQuery}
+              onChangeText={setSupplierQuery}
+              placeholder="搜索供应商名"
+              placeholderTextColor={theme.color.textAppTertiary}
+              autoFocus
+            />
+          </View>
+          <ScrollView style={styles.body} contentContainerStyle={styles.content}>
+            {supplierOptions
+              .filter((n) => n.toLowerCase().includes(supplierQuery.trim().toLowerCase()))
+              .map((n) => (
+                <TouchableOpacity
+                  key={n}
+                  style={styles.pickerItem}
+                  onPress={() => { setSupplierName(n); setSupplierPickerOpen(false); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.pickerItemText}>{n}</Text>
+                </TouchableOpacity>
+              ))}
+            {supplierOptions.filter((n) => n.toLowerCase().includes(supplierQuery.trim().toLowerCase())).length === 0 ? (
+              <View style={styles.empty}><Text style={styles.emptyText}>无匹配供应商</Text></View>
+            ) : null}
+          </ScrollView>
         </View>
       </Modal>
     </View>
@@ -2408,6 +2491,12 @@ function makeStyles(theme: any) {
     pickerField: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, paddingHorizontal: theme.spaceScale[4], height: S.controlLg, marginTop: theme.spaceScale[2] },
     pickerText: { flex: 1, fontSize: theme.font.sizeV4.body, color: theme.color.textApp },
     pickerArrow: { color: theme.color.textAppTertiary, fontSize: 20 },
+    // 供应商选择弹层（自定义可滚动 Modal）
+    pickerModalRoot: { flex: 1, backgroundColor: theme.color.bgApp },
+    pickerSearchWrap: { paddingHorizontal: theme.spaceScale[4], paddingVertical: theme.spaceScale[3], borderBottomWidth: 1, borderBottomColor: theme.color.dividerApp, backgroundColor: theme.color.surfaceApp },
+    pickerSearchInput: { backgroundColor: theme.color.surfaceSunken, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.md, height: S.controlLg, paddingHorizontal: theme.spaceScale[4], color: theme.color.textApp, fontSize: theme.font.sizeV4.body },
+    pickerItem: { paddingVertical: theme.spaceScale[4], paddingHorizontal: theme.spaceScale[4], borderBottomWidth: 1, borderBottomColor: theme.color.dividerApp, backgroundColor: theme.color.surfaceApp },
+    pickerItemText: { fontSize: theme.font.sizeV4.body, color: theme.color.textApp },
     saveBtn: { backgroundColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: S.controlLg, alignItems: 'center', justifyContent: 'center', marginTop: theme.spaceScale[4] },
     saveBtnText: { color: '#fff', fontSize: theme.font.sizeV4.body, fontWeight: theme.font.weight.medium },
     settleActionBtn: { backgroundColor: theme.color.primaryVivid, borderRadius: theme.radius.md, height: S.controlLg, alignItems: 'center', justifyContent: 'center', marginTop: theme.spaceScale[3] },
