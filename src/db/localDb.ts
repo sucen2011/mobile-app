@@ -488,7 +488,9 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
   let revList: any[] = [];
   try {
     const purRes = await apiFetch(`${baseUrl}/api/purchases`, { method: 'GET' });
-    if (purRes.ok && purRes.json?.data) {
+    // 仅当返回「非空数组」才替换缓存：后端瞬时返回 [] （源表正被外部台账重算/连接抖动）
+    // 时若先删后插 0 行，会把本地缓存清空，界面显示 ¥0.00 并要等下次拉取才恢复。空响应一律保留旧缓存。
+    if (purRes.ok && Array.isArray(purRes.json?.data) && purRes.json.data.length > 0) {
       purList = purRes.json.data;
       db.execSync('DELETE FROM purchases_cache');
     }
@@ -497,7 +499,9 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
   }
   try {
     const revRes = await apiFetch(`${baseUrl}/api/revenue`, { method: 'GET' });
-    if (revRes.ok && revRes.json?.data) {
+    // 同上：营收源表会被外部台账系统整表重算，重算空窗期容易出现瞬时空响应，
+    // 空数组时保留旧缓存，避免概览/报表被刷成 ¥0.00（用户反馈「营收数据经常断一会儿又恢复」的根因）。
+    if (revRes.ok && Array.isArray(revRes.json?.data) && revRes.json.data.length > 0) {
       revList = revRes.json.data;
       db.execSync('DELETE FROM revenues_cache');
     }
