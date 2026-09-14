@@ -86,27 +86,17 @@ export function SafeAreaRoot({ style, children }: Props) {
 export const SafeAreaScreen = SafeAreaRoot;
 
 /**
- * 全屏浮层（EntryForm / RevenueForm / RecordDetail）的顶部导航条容器。
+ * 顶部导航条容器（所有页面 header 共用：EntryForm / RevenueForm / RecordDetail /
+ * GoodsScreen / SupplierExpenseScreen / Settings … 全部通过它渲染顶栏）。
  *
- * 根因（为什么上面那段"绝对定位子节点会继承根 padding"的注释在 iOS 上不成立）：
- *   App.tsx 里这三个页面是挂在 `position:'absolute'; top:0; left:0; right:0; bottom:0`
- *   的 overlay 里的。iOS 上根节点的安全区**不是**一个普通 Yoga `padding` 样式 ——
- *   它由 RCTSafeAreaView 把 UIKit 的真实 inset 以 localData 形式灌进 shadow view，
- *   而四边都钉死（top/bottom 同时给值）的绝对定位子节点是按 containing block 的
- *   **border box** 解算的，于是 overlay 实际从 y=0 起画，header 就压在状态栏 / 灵动岛下面。
- *
- * 修法：在 header 这一层再包一个原生 SafeAreaView。
- *   UIKit 的 `safeAreaInsets` 是**相对**语义 —— 若祖先已经把安全区吃掉了，
- *   子视图读到的 inset 就是 0，所以嵌套是幂等的，不会出现双重内缩。
- *   同理，header 贴在顶部、和底部 Home Indicator 不相交，底部 inset 天然为 0。
- *
- * Android：RN 的 SafeAreaView 是纯 no-op View，而根节点用的是真正的 Yoga paddingTop
- *   （绝对定位子节点会继承），所以这里保持普通 View，不重复补状态栏高度。
+ * 设计为「零注入」的纯 View：不在这一层补安全区，避免双重内缩。
+ *   - 普通页面（home / business / goods …）的顶部安全区由根 SafeAreaRoot（SafeAreaView）提供；
+ *   - 全屏浮层（EntryForm / RevenueForm / RecordDetail / GoodsManageScreen）是 `position:absolute`
+ *     的四边钉死节点，读不到根 SafeAreaView 的 inset，其顶部/底部安全区统一在 App.tsx 的
+ *     `styles.modal` 容器上补（见 App.tsx）。
+ * 这样无论 react-native 的 SafeAreaView 在当前 RN 版本是否仍生效，顶栏都只被补一次。
  */
 export function SafeAreaHeader({ style, children }: Props) {
-  if (Platform.OS === 'ios') {
-    return <SafeAreaView style={style}>{children}</SafeAreaView>;
-  }
   return <View style={style}>{children}</View>;
 }
 

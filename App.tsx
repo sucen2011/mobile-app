@@ -13,7 +13,7 @@ import {
 import { runSync } from './src/sync/syncEngine';
 import { startSyncListener } from './src/sync/syncListener';
 import { isOnStoreLan } from './src/net/lan';
-import { SafeAreaRoot } from './src/components/SafeArea';
+import { SafeAreaRoot, TOP_INSET, BOTTOM_INSET } from './src/components/SafeArea';
 import type { TabKey, SyncState } from './src/nav';
 
 import OverviewScreen from './src/screens/OverviewScreen';
@@ -345,7 +345,12 @@ function AppInner() {
     tabIcon: { fontSize: 20, marginBottom: 2, opacity: 0.55 },
     tabLabel: { fontSize: theme.font.sizeV4.micro, color: theme.color.textAppTertiary },
     tabActive: { color: theme.color.navIndicator, opacity: 1, fontWeight: theme.font.weight.semibold },
-    modal: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.color.bgApp },
+    // 全屏浮层容器（EntryForm / RevenueForm / RecordDetail 共用）。
+    // 它是四边钉死的绝对定位节点，读不到根 SafeAreaRoot 的 iOS 顶部 inset，
+    // 故在此显式补顶部（状态栏/刘海）与底部（Home Indicator）安全区。
+    // 零依赖：TOP_INSET / BOTTOM_INSET 内部已按平台取 StatusBar.currentHeight（Android）
+    // 与设备启发式高度（iOS），未引入 react-native-safe-area-context。
+    modal: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.color.bgApp, paddingTop: TOP_INSET, paddingBottom: BOTTOM_INSET },
   });
 
   if (!onboarded) {
