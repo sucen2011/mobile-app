@@ -492,7 +492,6 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
     // 时若先删后插 0 行，会把本地缓存清空，界面显示 ¥0.00 并要等下次拉取才恢复。空响应一律保留旧缓存。
     if (purRes.ok && Array.isArray(purRes.json?.data) && purRes.json.data.length > 0) {
       purList = purRes.json.data;
-      db.execSync('DELETE FROM purchases_cache');
     }
   } catch (e: any) {
     console.warn('[localDb] fetch purchases snapshot failed:', e?.message || e);
@@ -503,35 +502,57 @@ export async function fetchAndCacheSnapshot(baseUrl: string) {
     // 空数组时保留旧缓存，避免概览/报表被刷成 ¥0.00（用户反馈「营收数据经常断一会儿又恢复」的根因）。
     if (revRes.ok && Array.isArray(revRes.json?.data) && revRes.json.data.length > 0) {
       revList = revRes.json.data;
-      db.execSync('DELETE FROM revenues_cache');
     }
   } catch (e: any) {
     console.warn('[localDb] fetch revenue snapshot failed:', e?.message || e);
   }
 
-  for (const p of purList) {
-    db.runSync(
-      `INSERT INTO purchases_cache
-       (id,orderNo,date,supplierName,totalAmount,paidAmount,paid,note,images,category,createdAt,raw)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        p.id, p.orderNo, p.date, p.supplierName || '',
-        Number(p.totalAmount) || 0, Number(p.paidAmount) || 0, p.paid ? 1 : 0,
-        p.note || '', JSON.stringify(p.images || []), p.category || '', Number(p.createdAt) || 0,
-        JSON.stringify(p),
-      ]
-    );
+  // 进货缓存：单事务原子替换（BEGIN…COMMIT）。插入中途异常则 ROLLBACK 保留旧缓存，
+  // 杜绝「已 DELETE 却只插了一半」的半空状态被概览/报表读到（显示 ¥0.00 或残缺记录）。
+  if (purList.length > 0) {
+    db.execSync('BEGIN');
+    try {
+      db.execSync('DELETE FROM purchases_cache');
+      for (const p of purList) {
+        db.runSync(
+          `INSERT INTO purchases_cache
+           (id,orderNo,date,supplierName,totalAmount,paidAmount,paid,note,images,category,createdAt,raw)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            p.id, p.orderNo, p.date, p.supplierName || '',
+            Number(p.totalAmount) || 0, Number(p.paidAmount) || 0, p.paid ? 1 : 0,
+            p.note || '', JSON.stringify(p.images || []), p.category || '', Number(p.createdAt) || 0,
+            JSON.stringify(p),
+          ]
+        );
+      }
+      db.execSync('COMMIT');
+    } catch (e: any) {
+      try { db.execSync('ROLLBACK'); } catch { /* 已回滚，保留旧缓存 */ }
+      console.warn('[localDb] purchases_cache replace failed, kept previous cache:', e?.message || e);
+    }
   }
 
-  for (const r of revList) {
-    db.runSync(
-      `INSERT INTO revenues_cache (id,date,total,note,payments,createdAt,raw)
-       VALUES (?,?,?,?,?,?,?)`,
-      [
-        r.id, r.date, Number(r.total) || 0, r.note || '',
-        JSON.stringify(r.payments || {}), Number(r.createdAt) || 0, JSON.stringify(r),
-      ]
-    );
+  // 营收缓存：同上，原子替换，防止半空。
+  if (revList.length > 0) {
+    db.execSync('BEGIN');
+    try {
+      db.execSync('DELETE FROM revenues_cache');
+      for (const r of revList) {
+        db.runSync(
+          `INSERT INTO revenues_cache (id,date,total,note,payments,createdAt,raw)
+           VALUES (?,?,?,?,?,?,?)`,
+          [
+            r.id, r.date, Number(r.total) || 0, r.note || '',
+            JSON.stringify(r.payments || {}), Number(r.createdAt) || 0, JSON.stringify(r),
+          ]
+        );
+      }
+      db.execSync('COMMIT');
+    } catch (e: any) {
+      try { db.execSync('ROLLBACK'); } catch { /* 已回滚，保留旧缓存 */ }
+      console.warn('[localDb] revenues_cache replace failed, kept previous cache:', e?.message || e);
+    }
   }
 
   // 营业日口径（今日→昨日）
