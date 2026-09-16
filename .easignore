@@ -1,5 +1,6 @@
 # EAS 构建时排除项：仅上传源码与必要资源，避免把大目录传到云端
 node_modules
+node_modules_sdk54_old
 .expo
 .exphome
 .git
