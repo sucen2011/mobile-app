@@ -1872,8 +1872,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 ))}
                 <TouchableOpacity style={styles.addItemBtn} onPress={addRebatePlanPeriod}><Text style={styles.addItemBtnText}>＋ 添加一期</Text></TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>到期时间（0=长期不限）</Text>
-                <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（空=长期）" allowEmpty />
+                <Text style={styles.fieldLabel}>到期时间（留空 = 长期不限）</Text>
+                <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（留空 = 长期不限）" allowEmpty />
               </View>
             ) : (
               <>
@@ -1916,8 +1916,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   </View>
                   <View style={{ width: 12 }} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.fieldLabel}>期限数（0=不限）</Text>
-                    <TextInput style={styles.input} value={rebateTotalPeriods} {...numInput(setRebateTotalPeriods)} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
+                    <Text style={styles.fieldLabel}>期限数（0 = 长期不限，期数不设上限）</Text>
+                    <TextInput style={styles.input} value={rebateTotalPeriods} keyboardType="numeric" onChangeText={(v: string) => { const c = v.replace(/[^0-9.]/g, ''); setRebateTotalPeriods(c); if (Number(c) === 0) setMaturityDate(''); }} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
                   </View>
                 </View>
                 <View style={styles.dualRow}>
@@ -1927,8 +1927,10 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   </View>
                   <View style={{ width: 12 }} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.fieldLabel}>到期时间（空=长期）</Text>
-                    <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（空=长期）" allowEmpty />
+                    {/* 长期不限 = rebateTotalPeriods 填 0 + maturityDate 留空；maturityDate 为 DATE 不可存 0。
+                       期限数=0（长期）时到期时间禁用并清空，杜绝「长期」与「具体到期日」并存 */}
+                    <Text style={styles.fieldLabel}>到期时间（留空 = 长期不限）</Text>
+                    <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（留空 = 长期不限）" allowEmpty disabled={Number(rebateTotalPeriods) === 0} />
                   </View>
                 </View>
               </>
