@@ -1168,6 +1168,20 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setRebatePlanPeriods((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
   const addRebatePlanPeriod = () =>
     setRebatePlanPeriods((prev) => [...prev, { seq: prev.length + 1, planDate: '', status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' }]);
+  // 长期模式「＋添加一期」：按起始月 + 步长顺延日期（季度步长=3，其余=1）；无期次时以起始月为基准生成第一期。仅长期模式调用，有界模式仍用 addRebatePlanPeriod
+  const addRebatePlanPeriodLongTerm = () =>
+    setRebatePlanPeriods((prev) => {
+      const step = rebatePlanTemplate === 'quarterly' ? 3 : 1;
+      const base = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
+      const items = rebatePlanGlobalItems.map((it) => ({ ...it }));
+      const remark = rebatePlanTemplate === 'quarterly' ? '按季' : '按月均摊';
+      if (prev.length === 0) {
+        return [{ seq: 1, planDate: base, status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark }];
+      }
+      const last = prev[prev.length - 1];
+      const nextDate = addMonths(last.planDate || base, step);
+      return [...prev, { seq: prev.length + 1, planDate: nextDate, status: 'pending', items: last.items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark }];
+    });
   const removeRebatePlanPeriod = (idx: number) =>
     setRebatePlanPeriods((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx).map((p, i) => ({ ...p, seq: i + 1 })) : prev));
   const setRebatePlanItem = (pIdx: number, iIdx: number, patch: Partial<ReturnItem>) =>
@@ -1889,7 +1903,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                     )}
                   </View>
                 ))}
-                <TouchableOpacity style={styles.addItemBtn} onPress={addRebatePlanPeriod}><Text style={styles.addItemBtnText}>＋ 添加一期</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.addItemBtn} onPress={rebateLongTerm ? addRebatePlanPeriodLongTerm : addRebatePlanPeriod}><Text style={styles.addItemBtnText}>＋ 添加一期</Text></TouchableOpacity>
 
                 <Text style={styles.fieldLabel}>到期时间（留空 = 长期不限）</Text>
                 <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（留空 = 长期不限）" allowEmpty />
