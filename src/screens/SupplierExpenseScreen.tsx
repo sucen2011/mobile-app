@@ -1133,11 +1133,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? 2 : 1
   );
   // 按计划分期：模板（equal/quarterly/seasonal=统一商品；custom=逐期独立商品）
+  // 长期不限：rebateTotalPeriods 为 0（后端不校验期数上限）；编辑时据此反推总期数=0
+  const rebateIsLongTermInit = Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 && Number(e!.rebateTotalPeriods) === 0;
   const [rebatePlanTemplate, setRebatePlanTemplate] = useState<string>(
-    Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? 'custom' : 'equal'
+    rebateIsLongTermInit ? 'equal' : (Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? 'custom' : 'equal')
   );
   const [rebatePlanCount, setRebatePlanCount] = useState<string>(
-    Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? String(e!.rebatePlanItems.length) : '12'
+    rebateIsLongTermInit ? '0' : (Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? String(e!.rebatePlanItems.length) : '12')
   );
   const [rebatePlanStart, setRebatePlanStart] = useState<string>(
     Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 && e!.rebatePlanItems[0]?.planDate
@@ -1213,6 +1215,19 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       periods.push({ seq: i + 1, planDate: addMonths(start, i), status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' });
     }
     setRebatePlanTemplate('custom');
+    setRebatePlanPeriods(periods);
+  };
+  // 长期不限：总期数填 0 ⇒ 后端不设期数上限；自动选中「按月均摊」并预生成前 12 期（起始月起按月推），可继续「＋添加一期」
+  const rebateLongTerm = Number(rebatePlanCount) === 0;
+  const genRebateLongTerm = () => {
+    const n = 12;
+    const start = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
+    const items = rebatePlanGlobalItems.map((it) => ({ ...it }));
+    const periods: RebatePlanItem[] = [];
+    for (let i = 0; i < n; i++) {
+      periods.push({ seq: i + 1, planDate: addMonths(start, i), status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark: '按月均摊' });
+    }
+    setRebatePlanTemplate('equal');
     setRebatePlanPeriods(periods);
   };
   // 品牌（按供应商区分费用，自由文本 + 历史联想）
@@ -1374,7 +1389,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           settledDate: null,
           remark: (p.remark || '').trim(),
         }));
-        payload.rebateTotalPeriods = plan.length;
+        // 长期不限：总期数=0 ⇒ rebateTotalPeriods 传 0（后端不设期数上限、不置「已结清」）；否则传实际期数
+        payload.rebateTotalPeriods = rebateLongTerm ? 0 : plan.length;
         // 标量字段（后端按 rebatePlanItems 派生，以下仅为兼容展示/推进）：起始日=首期，周期随模板
         payload.rebateStartDate = plan[0].planDate.trim().slice(0, 10);
         payload.rebateCycle = rebatePlanTemplate === 'quarterly' ? 3 : 1;
@@ -1769,8 +1785,8 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
               <View>
                 <View style={styles.dualRow}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.fieldLabel}>总期数（N）</Text>
-                    <TextInput style={styles.input} value={rebatePlanCount} {...numInput(setRebatePlanCount)} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
+                    <Text style={styles.fieldLabel}>总期数（N，0 = 长期不限）</Text>
+                    <TextInput style={styles.input} value={rebatePlanCount} keyboardType="numeric" onChangeText={(v: string) => { const c = v.replace(/[^0-9]/g, ''); setRebatePlanCount(c); if (Number(c) === 0) genRebateLongTerm(); }} placeholder="如 12（0=长期不限）" placeholderTextColor={theme.color.textAppTertiary} />
                   </View>
                   <View style={{ width: 12 }} />
                   <View style={{ flex: 1 }}>
@@ -1783,7 +1799,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'equal' && styles.chipActive]} onPress={genRebateEqualMonthly}><Text style={[styles.chipText, rebatePlanTemplate === 'equal' && styles.chipTextActive]}>按月均摊</Text></TouchableOpacity>
                   <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'quarterly' && styles.chipActive]} onPress={genRebateQuarterly}><Text style={[styles.chipText, rebatePlanTemplate === 'quarterly' && styles.chipTextActive]}>按季</Text></TouchableOpacity>
                   <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'seasonal' && styles.chipActive]} onPress={genRebateSeasonal}><Text style={[styles.chipText, rebatePlanTemplate === 'seasonal' && styles.chipTextActive]}>旺季淡季</Text></TouchableOpacity>
-                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'custom' && styles.chipActive]} onPress={genRebateCustom}><Text style={[styles.chipText, rebatePlanTemplate === 'custom' && styles.chipTextActive]}>逐期自定义</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'custom' && styles.chipActive, rebateLongTerm && styles.chipDisabled]} disabled={rebateLongTerm} onPress={rebateLongTerm ? () => {} : genRebateCustom}><Text style={[styles.chipText, rebatePlanTemplate === 'custom' && styles.chipTextActive, rebateLongTerm && styles.chipTextDisabled]}>逐期自定义</Text></TouchableOpacity>
                 </View>
 
                 {rebatePlanTemplate !== 'custom' ? (
@@ -1816,6 +1832,9 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   </View>
                 ) : null}
 
+                {rebateLongTerm ? (
+                  <Text style={[styles.planRemark, { marginTop: 4, color: theme.color.primaryVivid }]}>长期协议：已生成前 12 期，确认完可继续「＋添加一期」</Text>
+                ) : null}
                 <Text style={styles.fieldLabel}>逐期明细（期次 / 计划日期 / 计划返货商品 / 备注）</Text>
                 {rebatePlanPeriods.length === 0 ? (
                   <Text style={{ fontSize: 12, color: theme.color.textAppTertiary }}>选择上方快速模板生成期次</Text>
@@ -2872,6 +2891,8 @@ function makeStyles(theme: any) {
     chipActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid },
     chipText: { fontSize: 13, color: theme.color.textAppSecondary },
     chipTextActive: { color: theme.color.primaryVivid, fontWeight: theme.font.weight.medium },
+    chipDisabled: { opacity: 0.4 },
+    chipTextDisabled: { color: theme.color.textAppTertiary },
 
     // 导出 CSV
     exportRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: theme.spaceScale[3] },
