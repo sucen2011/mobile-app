@@ -92,6 +92,8 @@ export interface SupplierExpense {
   nextRebateDate: string;
   maturityDate: string;
   rebateTotalPeriods: number;
+  // 返货「逐期不同」：每期各自商品（多行），存在且非空时覆盖标量 rebateQty 模式
+  rebatePlanItems?: RebatePlanItem[];
   // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
   consignQty: number;
   consignUnit: string;
@@ -161,6 +163,18 @@ export interface ReturnItem {
   spec: string;
   unit: string;        // 件/箱/瓶…
   qty: number;
+}
+
+// 返货「逐期不同」结算：每期各自一组返货商品（多行），与标量 rebateQty 模式互斥。
+// 后端 seParseRebatePlan 校验每期 items 非空、qty>0、planDate 严格递增；确认收货时写 actualItems（items 保持不变）。
+export interface RebatePlanItem {
+  seq: number;
+  planDate: string;
+  status: 'pending' | 'received';
+  items: ReturnItem[];
+  actualItems: ReturnItem[];
+  settledDate?: string | null;
+  remark?: string;
 }
 
 // 返钱分期计划期次（与 PC 端 PlanPeriod 对齐；后端 plan_json TEXT 列存储）
@@ -236,6 +250,8 @@ export type ExpensePayload = {
   rebateStartDate?: string;
   maturityDate?: string;
   rebateTotalPeriods?: number;
+  // 返货「逐期不同」：每期各自商品（多行）；存在且非空时后端按逐期不同处理（覆盖标量）
+  rebatePlanItems?: RebatePlanItem[];
   // 寄售铺货（expenseType=3）：供应商铺货寄售，到期按 returnType 返钱/返货
   consignQty?: number;
   consignUnit?: string;
@@ -334,7 +350,7 @@ export async function updateDisposalStatus(baseUrl: string, id: number, disposal
 export async function settleExpense(
   baseUrl: string,
   id: number,
-  payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number }
+  payload: { settleAmount?: number; paymentMethod?: PaymentMethod; settleDate?: string; remark?: string; images?: ExpenseImageDraft[]; planSeq?: number; actualItems?: ReturnItem[] }
 ): Promise<SupplierExpense> {
   return apiJson<SupplierExpense>(baseUrl, `/api/supplier-expenses/${id}/settle`, {
     method: 'POST',

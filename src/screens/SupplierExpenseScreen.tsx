@@ -17,7 +17,7 @@ import {
   isRebateLikeExpense,
   type SupplierExpense, type ExpenseDetail, type ExpenseSummary,
   type ExpenseType, type SettleMethod, type SettlementTiming, type PaymentMethod, type ExpenseStatus, type RebateCycle, type ExpenseImageDraft,
-  type PlanPeriod, type ConsignItem, type ReturnItem,
+  type PlanPeriod, type ConsignItem, type ReturnItem, type RebatePlanItem,
 } from '../api/supplierExpense';
 import { fetchSuppliers } from '../api/suppliers';
 import { listSuppliers, listProducts } from '../db/localDb';
@@ -862,6 +862,38 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
       {/* 返货期次明细（与 PC 详情一致：每期备注 + 凭证图片，按 rebate_seq 关联） */}
       {isRebate ? (
         (() => {
+          if (Array.isArray(e.rebatePlanItems) && e.rebatePlanItems.length > 0) {
+            // 逐期不同：按期渲染计划 items 与实际 actualItems 对比
+            const plan = e.rebatePlanItems as RebatePlanItem[];
+            return (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>{`返货期次明细（逐期不同 · 已收 ${plan.filter((p) => p.status === 'received').length} / 共 ${plan.length} 期）`}</Text>
+                {plan.map((p, idx) => {
+                  const actual = Array.isArray(p.actualItems) && p.actualItems.length > 0 ? p.actualItems : (p.items || []);
+                  return (
+                    <View key={p.seq} style={{ borderTopWidth: idx === 0 ? 0 : 1, borderTopColor: theme.color.dividerApp, paddingVertical: 8 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontWeight: theme.font.weight.semibold, color: theme.color.textApp }}>{`第 ${p.seq} 期 · ${p.planDate || '—'}`}</Text>
+                        <Text style={{ fontSize: 12, color: p.status === 'received' ? theme.color.success : theme.color.textAppTertiary }}>{p.status === 'received' ? '已收' : '待收'}</Text>
+                      </View>
+                      <Text style={[styles.planRemark, { marginTop: 4 }]}>计划返货：</Text>
+                      {(p.items || []).map((it: ReturnItem, k: number) => (
+                        <Text key={k} style={styles.settleMeta}>{`· ${it.name} ${round(it.qty)}${it.unit || '件'}${it.spec ? ` · ${it.spec}` : ''}`}</Text>
+                      ))}
+                      {p.status === 'received' ? (
+                        <>
+                          <Text style={[styles.planRemark, { marginTop: 4 }]}>实际收货：</Text>
+                          {actual.map((it: ReturnItem, k: number) => (
+                            <Text key={k} style={styles.settleMeta}>{`· ${it.name} ${round(it.qty)}${it.unit || '件'}${it.spec ? ` · ${it.spec}` : ''}`}</Text>
+                          ))}
+                        </>
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </View>
+            );
+          }
           const periods = buildRebatePeriods(e, detail.settlements || []);
           return (
             <View style={styles.card}>
@@ -1087,6 +1119,35 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const removeReturnItem = (idx: number) =>
     setReturnItems((prev) => prev.filter((_, i) => i !== idx));
   const returnTotalQty = returnItems.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  // 返货「逐期不同」结算方式：1=按一次性给 2=按计划分期（标量） 3=逐期不同（每期各自商品）
+  const [rebateSettleMode, setRebateSettleMode] = useState<number>(
+    Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0 ? 3 : 2
+  );
+  const [rebatePlanPeriods, setRebatePlanPeriods] = useState<RebatePlanItem[]>(
+    Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0
+      ? e!.rebatePlanItems.map((p: RebatePlanItem) => ({
+          seq: Number(p.seq) || 0,
+          planDate: p.planDate || '',
+          status: (p.status === 'received' ? 'received' : 'pending') as ('pending' | 'received'),
+          items: (Array.isArray(p.items) ? p.items : [blankReturnItem()]).map((it: ReturnItem) => ({ ...it })),
+          actualItems: Array.isArray(p.actualItems) ? p.actualItems.map((it: ReturnItem) => ({ ...it })) : [],
+          settledDate: p.settledDate ?? null,
+          remark: p.remark || '',
+        }))
+      : [{ seq: 1, planDate: '', status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' }]
+  );
+  const setRebatePlanPeriod = (idx: number, patch: Partial<RebatePlanItem>) =>
+    setRebatePlanPeriods((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+  const addRebatePlanPeriod = () =>
+    setRebatePlanPeriods((prev) => [...prev, { seq: prev.length + 1, planDate: '', status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' }]);
+  const removeRebatePlanPeriod = (idx: number) =>
+    setRebatePlanPeriods((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx).map((p, i) => ({ ...p, seq: i + 1 })) : prev));
+  const setRebatePlanItem = (pIdx: number, iIdx: number, patch: Partial<ReturnItem>) =>
+    setRebatePlanPeriods((prev) => prev.map((p, i) => (i === pIdx ? { ...p, items: p.items.map((it, j) => (j === iIdx ? { ...it, ...patch } : it)) } : p)));
+  const addRebatePlanItem = (pIdx: number) =>
+    setRebatePlanPeriods((prev) => prev.map((p, i) => (i === pIdx ? { ...p, items: [...p.items, blankReturnItem()] } : p)));
+  const removeRebatePlanItem = (pIdx: number, iIdx: number) =>
+    setRebatePlanPeriods((prev) => prev.map((p, i) => (i === pIdx ? { ...p, items: p.items.length > 1 ? p.items.filter((_, j) => j !== iIdx) : p.items } : p)));
   // 品牌（按供应商区分费用，自由文本 + 历史联想）
   const [brand, setBrand] = useState(e?.brand || '');
   const [brandOptions, setBrandOptions] = useState<string[]>([]);
@@ -1147,13 +1208,14 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setReturnType(1);
     setReturnItems([blankReturnItem()]); setReturnNameFocus(null);
     setRebateQty(''); setRebateCycle(1); setRebateStartDate(todayStr()); setMaturityDate(''); setRebateTotalPeriods('');
+    setRebateSettleMode(2); setRebatePlanPeriods([{ seq: 1, planDate: '', status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' }]);
     setPlanMode(false); setPlanList([]); setAmount(''); setSettleMethod(3); setDueDate('');
   };
 
   // 切换结算时机：现给(1) 时强制按次、无到期日/无分期；到期给(2) 恢复默认结账周期
   const setSettlementTimingSafe = (t: SettlementTiming) => {
     setSettlementTiming(t);
-    if (t === 1) { setPlanMode(false); setPlanList([]); setSettleMethod(3); setDueDate(''); }
+    if (t === 1) { setPlanMode(false); setPlanList([]); setSettleMethod(3); setDueDate(''); setRebateSettleMode(2); }
   };
 
   const submit = async () => {
@@ -1217,17 +1279,49 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     } else if (expenseType === 2) {
       // 返货：关联商品（可手填，无匹配则 productId=0）、无单价、不折算金额
       const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
-      if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
-      if (rq <= 0) { onError('返货需填写每期数量（大于 0）'); return; }
-      payload.settleMethod = 3;
-      payload.productId = productId;
-      payload.productName = productName.trim();
-      payload.rebateCycle = rebateCycle;
-      payload.rebateQty = rq;
-      payload.rebateUnit = '件';
-      payload.rebateStartDate = rebateStartDate.trim().slice(0, 10) || undefined;
-      payload.maturityDate = maturityDate.trim() ? maturityDate.trim().slice(0, 10) : '';
-      payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
+      if (rebateSettleMode === 3) {
+        // 逐期不同：每期各自商品，校验每期日期/商品/数量/严格递增；后端按 rebatePlanItems 处理（覆盖标量）
+        const plan = rebatePlanPeriods.map((p) => ({ ...p }));
+        if (plan.length === 0) { onError('请至少添加一期返货计划'); return; }
+        let prevDate = '';
+        for (const p of plan) {
+          if (!p.planDate) { onError(`第 ${p.seq} 期日期必填`); return; }
+          if (prevDate && p.planDate <= prevDate) { onError(`第 ${p.seq} 期日期需严格晚于上一期`); return; }
+          prevDate = p.planDate;
+          const valid = (p.items || []).filter((it) => it.name.trim() && Number(it.qty) > 0);
+          if (valid.length === 0) { onError(`第 ${p.seq} 期至少添加一行商品（品名 + 数量 > 0）`); return; }
+        }
+        payload.settleMethod = 3;
+        payload.rebatePlanItems = plan.map((p) => ({
+          seq: p.seq,
+          planDate: p.planDate.trim().slice(0, 10),
+          status: 'pending',
+          items: p.items.map((it) => ({
+            productId: Number(it.productId) || 0,
+            name: it.name.trim().slice(0, 128),
+            spec: (it.spec || '').trim().slice(0, 64),
+            unit: (it.unit || '').trim().slice(0, 16) || '件',
+            qty: Math.max(0, Number(it.qty) || 0),
+          })),
+          actualItems: [],
+          settledDate: null,
+          remark: (p.remark || '').trim(),
+        }));
+        payload.rebateTotalPeriods = plan.length;
+      } else {
+        // 按一次性给 / 按计划分期（标量）：关联商品 + 每期固定数量
+        if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
+        if (rq <= 0) { onError('返货需填写每期数量（大于 0）'); return; }
+        payload.settleMethod = 3;
+        payload.productId = productId;
+        payload.productName = productName.trim();
+        payload.rebateCycle = rebateCycle;
+        payload.rebateQty = rq;
+        payload.rebateUnit = '件';
+        payload.rebateStartDate = rebateStartDate.trim().slice(0, 10) || undefined;
+        payload.maturityDate = maturityDate.trim() ? maturityDate.trim().slice(0, 10) : '';
+        payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
+      }
     } else {
       // 返钱：金额模型 或 分期计划
       if (settlementTiming === 1) {
@@ -1583,62 +1677,131 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
             )}
           </View>
         ) : expenseType === 2 ? (
-          /* 返货：关联商品 + 周期返还实物，无单价/金额 */
+          /* 返货：关联商品 + 周期返还实物，无单价/金额；到期给时可选「逐期不同」每期各自商品 */
           <View>
-            <Text style={styles.fieldLabel}>关联商品 *（可手填/可搜索选择）</Text>
-            <TextInput
-              style={styles.input} value={productName}
-              onChangeText={(v) => { setProductName(v); setProductId(0); }}
-              placeholder="输入品名搜索，或选择下方匹配商品" placeholderTextColor={theme.color.textAppTertiary}
-            />
-            {productName.trim() && filteredProducts.length > 0 && (
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, marginBottom: 4 }}>
-                {filteredProducts.map((p) => (
-                  <TouchableOpacity
-                    key={p.id}
-                    style={[styles.chip, productId === p.id && styles.chipActive]}
-                    onPress={() => { setProductName(p.name); setProductId(Number(p.id)); }}
-                  >
-                    <Text style={[styles.chipText, productId === p.id && styles.chipTextActive]}>{p.name}</Text>
+            {settlementTiming === 2 ? (
+              <>
+                <Text style={styles.fieldLabel}>结算方式</Text>
+                <View style={styles.segRow}>
+                  <TouchableOpacity style={[styles.segBtn, rebateSettleMode === 1 && styles.segBtnActive]} onPress={() => setRebateSettleMode(1)}>
+                    <Text style={[styles.segBtnText, rebateSettleMode === 1 && styles.segBtnTextActive]}>按一次性给</Text>
                   </TouchableOpacity>
+                  <TouchableOpacity style={[styles.segBtn, rebateSettleMode === 2 && styles.segBtnActive]} onPress={() => setRebateSettleMode(2)}>
+                    <Text style={[styles.segBtnText, rebateSettleMode === 2 && styles.segBtnTextActive]}>按计划分期</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.segBtn, rebateSettleMode === 3 && styles.segBtnActive]} onPress={() => setRebateSettleMode(3)}>
+                    <Text style={[styles.segBtnText, rebateSettleMode === 3 && styles.segBtnTextActive]}>逐期不同</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : null}
+
+            {rebateSettleMode === 3 ? (
+              <View>
+                <Text style={styles.fieldLabel}>逐期返货计划（每期商品可不同）</Text>
+                {rebatePlanPeriods.map((p, pIdx) => (
+                  <View key={p.seq} style={styles.consignItemCard}>
+                    <View style={styles.consignItemHead}>
+                      <Text style={styles.consignItemTitle}>{`第 ${p.seq} 期`}</Text>
+                      <TouchableOpacity onPress={() => removeRebatePlanPeriod(pIdx)}>
+                        <Text style={styles.consignItemDel}>删除本期</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.fieldLabel}>本期日期 *</Text>
+                    <DatePickerField value={p.planDate} onChange={(v: string) => setRebatePlanPeriod(pIdx, { planDate: v })} title={`第${p.seq}期日期`} />
+                    {p.items.map((it, iIdx) => (
+                      <View key={iIdx} style={{ borderTopWidth: iIdx === 0 ? 0 : 1, borderTopColor: theme.color.dividerApp, paddingTop: iIdx === 0 ? 0 : 8, marginTop: 8 }}>
+                        <View style={styles.consignItemHead}>
+                          <Text style={styles.consignItemTitle}>{`商品 ${iIdx + 1}`}</Text>
+                          <TouchableOpacity onPress={() => removeRebatePlanItem(pIdx, iIdx)}>
+                            <Text style={styles.consignItemDel}>删除</Text>
+                          </TouchableOpacity>
+                        </View>
+                        <Text style={styles.fieldLabel}>品名 *</Text>
+                        <TextInput style={styles.input} value={it.name} onChangeText={(v: string) => setRebatePlanItem(pIdx, iIdx, { name: v, productId: 0 })} placeholder="如：怡宝 550ml" placeholderTextColor={theme.color.textAppTertiary} />
+                        <View style={styles.dualRow}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabel}>数量 *</Text>
+                            <TextInput style={styles.input} value={String(it.qty)} {...numInput((v: string) => setRebatePlanItem(pIdx, iIdx, { qty: Number(v) || 0 }))} placeholder="如 6" placeholderTextColor={theme.color.textAppTertiary} />
+                          </View>
+                          <View style={{ width: 12 }} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabel}>单位</Text>
+                            <TextInput style={styles.input} value={it.unit} onChangeText={(v: string) => setRebatePlanItem(pIdx, iIdx, { unit: v })} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
+                          </View>
+                        </View>
+                        <Text style={styles.fieldLabel}>规格</Text>
+                        <TextInput style={styles.input} value={it.spec} onChangeText={(v: string) => setRebatePlanItem(pIdx, iIdx, { spec: v })} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+                      </View>
+                    ))}
+                    <TouchableOpacity style={styles.addItemBtn} onPress={() => addRebatePlanItem(pIdx)}>
+                      <Text style={styles.addItemBtnText}>＋ 添加商品行</Text>
+                    </TouchableOpacity>
+                  </View>
                 ))}
-              </View>
-            )}
-            {productName.trim() && filteredProducts.length === 0 && productOptions.length > 0 && (
-              <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>无匹配商品，将以手填保存</Text>
-            )}
-            <Text style={styles.fieldLabel}>返货周期</Text>
-            <View style={styles.segRow}>
-              {([
-              { k: 1, t: '每月' }, { k: 2, t: '每年' }, { k: 3, t: '每季度' }, { k: 4, t: '自定义' },
-            ] as { k: RebateCycle; t: string }[]).map((o) => (
-                <TouchableOpacity key={o.k} style={[styles.segBtn, rebateCycle === o.k && styles.segBtnActive]} onPress={() => setRebateCycle(o.k)}>
-                  <Text style={[styles.segBtnText, rebateCycle === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+                <TouchableOpacity style={styles.addItemBtn} onPress={addRebatePlanPeriod}>
+                  <Text style={styles.addItemBtnText}>＋ 添加一期</Text>
                 </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>每期数量（件）*</Text>
-                <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="如 6" placeholderTextColor={theme.color.textAppTertiary} />
+                <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>每期至少 1 行商品、数量 &gt; 0、日期严格递增；确认收货时按实际到货填写</Text>
               </View>
-              <View style={{ width: 12 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>期限数（0=不限）</Text>
-                <TextInput style={styles.input} value={rebateTotalPeriods} {...numInput(setRebateTotalPeriods)} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
-              </View>
-            </View>
-            <View style={styles.dualRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>首期日期</Text>
-                <DatePickerField value={rebateStartDate} onChange={setRebateStartDate} title="首期日期" />
-              </View>
-              <View style={{ width: 12 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>到期时间（空=长期）</Text>
-                <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（空=长期）" allowEmpty />
-              </View>
-            </View>
+            ) : (
+              <>
+                <Text style={styles.fieldLabel}>关联商品 *（可手填/可搜索选择）</Text>
+                <TextInput
+                  style={styles.input} value={productName}
+                  onChangeText={(v) => { setProductName(v); setProductId(0); }}
+                  placeholder="输入品名搜索，或选择下方匹配商品" placeholderTextColor={theme.color.textAppTertiary}
+                />
+                {productName.trim() && filteredProducts.length > 0 && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, marginBottom: 4 }}>
+                    {filteredProducts.map((p) => (
+                      <TouchableOpacity
+                        key={p.id}
+                        style={[styles.chip, productId === p.id && styles.chipActive]}
+                        onPress={() => { setProductName(p.name); setProductId(Number(p.id)); }}
+                      >
+                        <Text style={[styles.chipText, productId === p.id && styles.chipTextActive]}>{p.name}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                {productName.trim() && filteredProducts.length === 0 && productOptions.length > 0 && (
+                  <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>无匹配商品，将以手填保存</Text>
+                )}
+                <Text style={styles.fieldLabel}>返货周期</Text>
+                <View style={styles.segRow}>
+                  {([
+                  { k: 1, t: '每月' }, { k: 2, t: '每年' }, { k: 3, t: '每季度' }, { k: 4, t: '自定义' },
+                ] as { k: RebateCycle; t: string }[]).map((o) => (
+                    <TouchableOpacity key={o.k} style={[styles.segBtn, rebateCycle === o.k && styles.segBtnActive]} onPress={() => setRebateCycle(o.k)}>
+                      <Text style={[styles.segBtnText, rebateCycle === o.k && styles.segBtnTextActive]}>{o.t}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>每期数量（件）*</Text>
+                    <TextInput style={styles.input} value={rebateQty} {...numInput(setRebateQty)} placeholder="如 6" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>期限数（0=不限）</Text>
+                    <TextInput style={styles.input} value={rebateTotalPeriods} {...numInput(setRebateTotalPeriods)} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
+                  </View>
+                </View>
+                <View style={styles.dualRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>首期日期</Text>
+                    <DatePickerField value={rebateStartDate} onChange={setRebateStartDate} title="首期日期" />
+                  </View>
+                  <View style={{ width: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>到期时间（空=长期）</Text>
+                    <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（空=长期）" allowEmpty />
+                  </View>
+                </View>
+              </>
+            )}
           </View>
         ) : (
           /* 寄售铺货（两层模型）：一层=铺货商品明细(多行 ConsignItem，含正常/搭赠)，二层=到期结算方式(仅返钱/返货) */
@@ -2038,6 +2201,16 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
   const rebateEffSeq = planSeq != null ? planSeq : rebateCurrentSeq;
   const rebateSelPeriod = rebatePeriods.find((p) => p.seq === rebateEffSeq) || null;
   const rebateSelOverdue = !!(rebateSelPeriod && !rebateSelPeriod.settled && rebateSelPeriod.planDate && rebateSelPeriod.planDate < todayStr());
+  // 返货「逐期不同」：实际收货商品（预填该期计划 items，可改），确认收货时随 planSeq 上报
+  const rebateIsDiff = isRebate && Array.isArray(target?.rebatePlanItems) && target!.rebatePlanItems.length > 0;
+  const [actualItems, setActualItems] = useState<ReturnItem[]>([]);
+  React.useEffect(() => {
+    if (rebateIsDiff && rebateEffSeq != null) {
+      const pp = (target!.rebatePlanItems as RebatePlanItem[]).find((p) => p.seq === rebateEffSeq);
+      if (pp) setActualItems((Array.isArray(pp.actualItems) && pp.actualItems.length > 0 ? pp.actualItems : (pp.items || [])).map((it: ReturnItem) => ({ ...it })));
+      else setActualItems([]);
+    }
+  }, [rebateEffSeq, target, rebateIsDiff]);
 
   const openCamera = async () => {
     if (!permission?.granted) {
@@ -2190,6 +2363,33 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
                     <InfoRow label="本期（下次）" value={rebateSelPeriod?.planDate || target.nextRebateDate || '—'} />
                     <InfoRow label="说明" value={Number(target?.rebateTotalPeriods) === 1 ? '确认后本期结清，无需再推进' : '确认后记为「返货确认收货」并自动推进下一期'} />
                   </View>
+                  {rebateIsDiff ? (
+                    <View style={styles.card}>
+                      <Text style={styles.sectionTitle}>{`实际收货（第 ${rebateEffSeq} 期，可修改）`}</Text>
+                      {actualItems.map((it, iIdx) => (
+                        <View key={iIdx} style={{ borderTopWidth: iIdx === 0 ? 0 : 1, borderTopColor: theme.color.dividerApp, paddingVertical: 6 }}>
+                          <Text style={styles.fieldLabel}>{`商品 ${iIdx + 1}`}</Text>
+                          <TextInput style={styles.input} value={it.name} onChangeText={(v: string) => setActualItems((prev) => prev.map((x, j) => (j === iIdx ? { ...x, name: v, productId: 0 } : x)))} placeholder="品名" placeholderTextColor={theme.color.textAppTertiary} />
+                          <View style={styles.dualRow}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.fieldLabel}>数量</Text>
+                              <TextInput style={styles.input} value={String(it.qty)} {...numInput((v: string) => setActualItems((prev) => prev.map((x, j) => (j === iIdx ? { ...x, qty: Number(v) || 0 } : x))))} placeholder="0" placeholderTextColor={theme.color.textAppTertiary} />
+                            </View>
+                            <View style={{ width: 12 }} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.fieldLabel}>单位</Text>
+                              <TextInput style={styles.input} value={it.unit} onChangeText={(v: string) => setActualItems((prev) => prev.map((x, j) => (j === iIdx ? { ...x, unit: v } : x)))} placeholder="件" placeholderTextColor={theme.color.textAppTertiary} />
+                            </View>
+                          </View>
+                          <Text style={styles.fieldLabel}>规格</Text>
+                          <TextInput style={styles.input} value={it.spec} onChangeText={(v: string) => setActualItems((prev) => prev.map((x, j) => (j === iIdx ? { ...x, spec: v } : x)))} placeholder="选填" placeholderTextColor={theme.color.textAppTertiary} />
+                        </View>
+                      ))}
+                      <TouchableOpacity style={styles.addItemBtn} onPress={() => setActualItems((prev) => [...prev, { productId: 0, name: '', spec: '', unit: '件', qty: 0 }])}>
+                        <Text style={styles.addItemBtnText}>＋ 添加商品</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
                   <Text style={styles.fieldLabel}>收货日期 *</Text>
                   <DatePickerField value={settleDate} onChange={setSettleDate} title="收货日期" />
                   <Text style={styles.fieldLabel}>备注</Text>
@@ -2212,6 +2412,13 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
                           remark: remark.trim(),
                           images: settleImages.map((u) => ({ imageUrl: u, imageId: null })),
                           planSeq: rebateEffSeq,
+                          ...(rebateIsDiff ? { actualItems: actualItems.map((it) => ({
+                            productId: Number(it.productId) || 0,
+                            name: it.name.trim().slice(0, 128),
+                            spec: (it.spec || '').trim().slice(0, 64),
+                            unit: (it.unit || '').trim().slice(0, 16) || '件',
+                            qty: Math.max(0, Number(it.qty) || 0),
+                          })) } : {}),
                         });
                       }}
                     ]);
