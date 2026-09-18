@@ -1196,7 +1196,11 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setRebatePlanGlobalItems(next);
     setRebatePlanPeriods((prev) => prev.map((p) => ({ ...p, items: next.map((it) => ({ ...it })) })));
   };
-  const addRebateGlobalItem = () => setRebatePlanGlobalItems((prev) => [...prev, blankReturnItem()]);
+  const addRebateGlobalItem = () => {
+    const next = [...rebatePlanGlobalItems, blankReturnItem()];
+    setRebatePlanGlobalItems(next);
+    setRebatePlanPeriods((prev) => prev.map((p) => ({ ...p, items: next.map((it) => ({ ...it })) })));
+  };
   const removeRebateGlobalItem = (idx: number) => {
     const next = rebatePlanGlobalItems.filter((_, i) => i !== idx);
     const list = next.length ? next : [blankReturnItem()];
