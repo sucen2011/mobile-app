@@ -12,11 +12,12 @@ import {
   getAllBarrelTypes, insertBarrelPress, insertBarrelRefund, insertBarrelExchange,
   getDepositFlows, getAllBarrelStock, updateBarrelStockInStore,
   getBarrelSummary, searchBarrelPress, deleteBarrelPress, clearTestBarrelRecords,
+  getAllBarrelRefund,
   type BarrelType, type BarrelPress, type BarrelRefund, type BarrelExchange, type BarrelExchangeItem, type BarrelStockRow, type DepositFlowRow,
 } from '../db/localDb';
 
 interface Props { sync: SyncState; cacheVersion: number; onSyncAll?: () => void; }
-type ViewKey = 'main' | 'press' | 'refund' | 'exchange' | 'flow' | 'stock';
+type ViewKey = 'main' | 'press' | 'refund' | 'exchange' | 'flow' | 'stock' | 'query';
 
 const VIEW_TITLES: Record<Exclude<ViewKey, 'main'>, string> = {
   press: '压桶登记',
@@ -24,6 +25,7 @@ const VIEW_TITLES: Record<Exclude<ViewKey, 'main'>, string> = {
   exchange: '换桶登记',
   flow: '押金流水',
   stock: '桶库存',
+  query: '客户查询',
 };
 
 function uuid() {
@@ -98,6 +100,8 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
             onPress={() => setView('flow')} />
           <ActionRow label="桶库存" note="按桶类型在库 / 在押"
             onPress={() => setView('stock')} />
+          <ActionRow label="客户查询" note="按手机号 / 客户名称查压桶、退桶与押金流水"
+            onPress={() => setView('query')} />
         </View>
 
         <View style={styles.syncCard}>
@@ -141,6 +145,7 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
         {view === 'exchange' && <ExchangeForm onSaved={savedToFlow} lanOn={sync.lanOn} onSyncAll={onSyncAll} />}
         {view === 'flow' && <FlowList tick={tick} />}
         {view === 'stock' && <StockList tick={tick} onChanged={refresh} />}
+        {view === 'query' && <QueryView tick={tick} />}
       </View>
     </ScrollView>
   );
@@ -619,6 +624,151 @@ function FlowList({ tick }: { tick: number }) {
   );
 }
 
+// ============ 客户查询（按手机号 / 客户名称查压退桶 + 押金流水）============
+// 支持手机号或客户名称检索；命中多个客户时可切换 chip 分别查看。
+// 说明：押金流水表只有客户名、没有手机号，故手机号检索时借压/退桶命中的客户名反查，避免漏掉。
+function QueryView({ tick }: { tick: number }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
+  const [kw, setKw] = useState('');
+  const [press, setPress] = useState<BarrelPress[]>([]);
+  const [refund, setRefund] = useState<BarrelRefund[]>([]);
+  const [flows, setFlows] = useState<DepositFlowRow[]>([]);
+  const [sel, setSel] = useState('');
+  const [searched, setSearched] = useState(false);
+
+  const doSearch = () => {
+    const q = kw.trim();
+    if (!q) { Alert.alert('客户查询', '请输入手机号或客户名称'); return; }
+    const match = (name?: string, phone?: string) =>
+      (!!name && name.includes(q)) || (!!phone && phone.includes(q));
+    const pr = searchBarrelPress(q);
+    const rf = getAllBarrelRefund().filter((r) => match(r.customer, r.phone));
+    // 押金流水无手机号字段 → 用压/退桶命中的客户名反查
+    const matchedNames = new Set<string>([...pr, ...rf].map((r) => r.customer).filter(Boolean));
+    const fl = getDepositFlows().filter((f) => match(f.customer) || matchedNames.has(f.customer));
+    setPress(pr);
+    setRefund(rf);
+    setFlows(fl);
+    setSearched(true);
+    const names = Array.from(new Set([...pr, ...rf, ...fl].map((r) => r.customer).filter(Boolean)));
+    setSel(names[0] || '');
+  };
+
+  const all = [...press, ...refund, ...flows];
+  // tick 变化（下行同步完成）时重新派生，避免结果陈旧
+  const names = useMemo(
+    () => Array.from(new Set(all.map((r) => r.customer).filter(Boolean))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [press, refund, flows, tick],
+  );
+  const selName = sel && names.includes(sel) ? sel : names[0] || '';
+  const selPress = press.filter((p) => p.customer === selName);
+  const selRefund = refund.filter((r) => r.customer === selName);
+  const selFlow = flows.filter((f) => f.customer === selName);
+
+  const fmtItems = (items: { barrel: string; count: number }[] = []) =>
+    items.map((i) => `${i.barrel}×${i.count}`).join('，') || '—';
+  const money = (v: number) => `¥${(v || 0).toFixed(2)}`;
+  const flowMeta = (t: DepositFlowRow['type']) =>
+    t === 'press'
+      ? { label: '压桶', bg: theme.color.primarySoft, fg: theme.color.primaryVivid }
+      : t === 'refund'
+        ? { label: '退桶', bg: theme.color.surfaceRaised, fg: theme.color.info }
+        : { label: '换桶', bg: theme.color.surfaceRaised, fg: theme.color.warning };
+
+  return (
+    <View>
+      <View style={styles.card}>
+        <TextInput
+          style={styles.input}
+          value={kw}
+          onChangeText={setKw}
+          placeholder="输入手机号或客户名称"
+          placeholderTextColor={theme.color.textAppTertiary}
+          onSubmitEditing={doSearch}
+        />
+        <TouchableOpacity style={styles.primaryBtn} onPress={doSearch}>
+          <Text style={styles.primaryBtnText}>查询</Text>
+        </TouchableOpacity>
+      </View>
+
+      {searched && names.length === 0 ? (
+        <View style={styles.empty}><Text style={styles.emptyText}>未查询到相关压 / 退桶记录</Text></View>
+      ) : names.length > 0 ? (
+        <View>
+          {names.length > 1 && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: theme.spaceScale[3] }}>
+              {names.map((n) => (
+                <TouchableOpacity
+                  key={n}
+                  onPress={() => setSel(n)}
+                  style={[styles.chip, n === selName && { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primaryVivid }]}
+                >
+                  <Text style={[styles.chipText, n === selName && { color: theme.color.primaryVivid }]}>{n}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
+
+          <SectionBlock title={`压桶记录（${selPress.length}）`}>
+            {selPress.length === 0 ? <Text style={styles.emptyText}>无</Text> : selPress.map((p) => (
+              <View key={p.id} style={styles.flowRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.flowTitle}>{p.no} · {formatChineseDate(p.date)}</Text>
+                  <Text style={styles.flowSub}>{fmtItems(p.items)} · 押金 {money(p.totalDeposit)}</Text>
+                </View>
+              </View>
+            ))}
+          </SectionBlock>
+
+          <SectionBlock title={`退桶记录（${selRefund.length}）`}>
+            {selRefund.length === 0 ? <Text style={styles.emptyText}>无</Text> : selRefund.map((r) => (
+              <View key={r.id} style={styles.flowRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.flowTitle}>{r.no} · {formatChineseDate(r.date)}</Text>
+                  <Text style={styles.flowSub}>{fmtItems(r.items)} · 实退 {money(r.refund)}</Text>
+                </View>
+              </View>
+            ))}
+          </SectionBlock>
+
+          <SectionBlock title={`押金流水（${selFlow.length}）`}>
+            {selFlow.length === 0 ? <Text style={styles.emptyText}>无</Text> : selFlow.map((f) => {
+              const meta = flowMeta(f.type);
+              return (
+                <View key={f.key} style={styles.flowRow}>
+                  <View style={[styles.flowTag, { backgroundColor: meta.bg }]}>
+                    <Text style={[styles.flowTagText, { color: meta.fg }]}>{meta.label}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.flowTitle}>{formatChineseDate(f.date)} · {f.customer || '—'}</Text>
+                    <Text style={styles.flowSub}>{f.remark || '—'}</Text>
+                  </View>
+                  <Text style={[styles.flowAmount, { color: f.amount >= 0 ? theme.color.success : theme.color.danger }]}>
+                    {f.amount >= 0 ? '+' : ''}{money(f.amount)}
+                  </Text>
+                </View>
+              );
+            })}
+          </SectionBlock>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function SectionBlock({ title, children }: { title: string; children: React.ReactNode }) {
+  const { theme } = useTheme();
+  const styles = makeStyles(theme);
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
 // ============ 桶库存 ============
 function StockList({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const { theme } = useTheme();
@@ -701,6 +851,8 @@ function makeStyles(theme: any) {
     actionLabel: { fontSize: theme.font.sizeV4.body, color: theme.color.textApp, fontWeight: '500' },
     actionSub: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginTop: 2 },
     actionArrow: { color: theme.color.textAppTertiary, fontSize: 22 },
+    chip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: theme.radius.pill, backgroundColor: theme.color.surfaceRaised, borderWidth: 1, borderColor: theme.color.borderApp, marginRight: theme.spaceScale[2] },
+    chipText: { fontSize: 13, color: theme.color.textAppSecondary },
     syncCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.color.surfaceApp, borderWidth: 1, borderColor: theme.color.borderApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[4] },
     syncDot: { width: 8, height: 8, borderRadius: 4, marginRight: theme.spaceScale[2] },
     syncText: { flex: 1, fontSize: theme.font.sizeV4.bodySm, color: theme.color.textAppSecondary, lineHeight: 20 },
