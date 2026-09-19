@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   StyleSheet, View, Text, TextInput, TouchableOpacity, ScrollView, Modal, Alert,
-  KeyboardAvoidingView, Platform, Switch,
+  KeyboardAvoidingView, Platform, Switch, Image,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { BOTTOM_INSET, SafeAreaHeader } from '../components/SafeArea';
@@ -16,6 +16,8 @@ import { parsePurchaseBill, matchSupplier } from '@sucen/ocr-core';
 import DatePickerField from '../components/DatePickerField';
 // ⚠️ 必须用 /legacy 子入口：SDK 54 主入口的 readAsStringAsync 是调用即抛的弃用桩
 import * as FileSystem from 'expo-file-system/legacy';
+// 拍照图像预处理：EXIF 自动转正 → 限尺寸 → JPEG 压缩，输出 base64 直接送 OCR
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 interface ItemRow {
   barcode?: string;
@@ -353,16 +355,36 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
     }
   };
 
+  // OCR 失败的统一对客弹窗：按错误分类码给不同标题，并提供「重试」按钮。
+  // 区分两种主因：LAN_UNREACHABLE（店铺电脑不可达）→ 引导检查 WiFi/服务器地址/电脑开机；
+  // TENCENT_DIRECT_FAILED / NETWORK（腾讯云直连失败）→ 提示检查密钥与网络。重试会重新跑整条 OCR 链路。
+  function showOcrError(e: any, uri: string) {
+    const code: string = e?.code || 'UNKNOWN';
+    const title =
+      code === 'LAN_UNREACHABLE' ? '未连接店铺电脑'
+      : code === 'TENCENT_DIRECT_FAILED' ? '腾讯云识别失败'
+      : code === 'NETWORK' ? '网络异常'
+      : '识别失败';
+    const msg =
+      e?.friendlyMessage ||
+      e?.message ||
+      '请确认已连接店铺服务器（含腾讯云密钥的 3001 后端）。';
+    Alert.alert(title, msg, [
+      { text: '重试', onPress: () => { void recognizeUri(uri); } },
+      { text: '取消', style: 'cancel' },
+    ]);
+  }
+
   // 调后端 /api/ocr/scan 识别进货单照片，解析后回填表单字段（仅覆盖为空/默认值的字段，不覆盖用户已填内容）
   const recognizeUri = async (uri: string) => {
     setRecognizing(true);
     try {
-      // 读本地图片为 base64 dataURL：用 Expo FileSystem 读文件 → base64
-      const base64 = await readFileAsBase64(uri);
+      // 读本地图片为 base64 dataURL：先图像预处理（EXIF 转正/限尺寸/压缩）→ base64
+      const base64 = await preprocessImage(uri);
       const dataUrl = `data:image/jpeg;base64,${base64}`;
       // 直连腾讯云优先 → 失败回退后端代理（统一入口见 src/api/ocrCredential.ts）
       const result = await recognizeOcr(dataUrl, baseUrl).catch((e: any) => {
-        Alert.alert('识别失败', e?.message || '请确认已连接店铺服务器（含腾讯云密钥的 3001 后端）。');
+        showOcrError(e, uri);
         return null;
       });
       if (!result) return;
@@ -459,6 +481,47 @@ export default function EntryForm({ editId, baseUrl, onSaved, onCancel }: { edit
     } catch (e: any) {
       console.warn('[EntryForm] readFileAsBase64 failed', e?.message || e);
       throw new Error('读取照片失败');
+    }
+  };
+
+  // 取图片像素尺寸（回调式 Image.getSize 包成 Promise；拿不到尺寸就回退 0，由压缩兜底）
+  const getImageSize = (uri: string): Promise<{ width: number; height: number }> =>
+    new Promise((resolve, reject) => {
+      Image.getSize(
+        uri,
+        (w, h) => resolve({ width: w, height: h }),
+        (err) => reject(err),
+      );
+    });
+
+  // 拍照图像预处理：EXIF 自动转正（RN 图像管线解码时处理方向）→ 最长边 ≤2000px → JPEG 压缩 0.8 → base64。
+  // 不覆盖原图：manipulateAsync 写入新的缓存文件，原 uri 保持不变，归档文件名不受影响。
+  // 任一步失败都回退到「读原图 base64」，保证 OCR 至少还能跑。
+  const preprocessImage = async (uri: string): Promise<string> => {
+    try {
+      let actions: { resize: { width?: number; height?: number } }[] = [];
+      try {
+        const { width, height } = await getImageSize(uri).catch(() => ({ width: 0, height: 0 }));
+        const longest = Math.max(width || 0, height || 0);
+        if (longest > 2000) {
+          // 只给较长边定值，manipulateAsync 自动按原比例缩放另一条边
+          if ((width || 0) >= (height || 0)) actions = [{ resize: { width: 2000 } }];
+          else actions = [{ resize: { height: 2000 } }];
+        }
+      } catch {
+        /* 拿不到尺寸就按原图处理 */
+      }
+      const result = await manipulateAsync(uri, actions, {
+        compress: 0.8,
+        format: SaveFormat.JPEG,
+        base64: true,
+      });
+      // 部分平台 base64 字段为空，退而读新生成的缓存文件
+      if (result.base64) return result.base64;
+      return await readFileAsBase64(result.uri);
+    } catch (e: any) {
+      console.warn('[EntryForm] 图像预处理失败，回退原始图：', e?.message || e);
+      return await readFileAsBase64(uri);
     }
   };
 

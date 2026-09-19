@@ -1,32 +1,37 @@
 import { apiFetch, type ApiResult } from './client';
 import { getApiToken } from '../config';
 import { getMeta, setMeta } from '../db/localDb';
-import { recognizeWithTencentDirect, type OcrCredential } from '../utils/tencentOcrDirect';
+import { recognizeWithTencentDirect, type OcrCredential, OcrError } from '../utils/tencentOcrDirect';
 
 const OCR_CREDENTIAL_KEY = 'ocr_credential';
+// 密钥缓存有效期 7 天：过期强制回源后端刷新（店铺可能轮换了腾讯云密钥）
+const CREDENTIAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** 读取本机缓存的腾讯云 OCR 密钥；缺失/损坏返回 null */
+/** 读取本机缓存的腾讯云 OCR 密钥；缺失/损坏/过期返回 null */
 export function getCachedCredential(): OcrCredential | null {
   const v = getMeta(OCR_CREDENTIAL_KEY);
   if (!v) return null;
   try {
-    const c = JSON.parse(v) as Partial<OcrCredential>;
-    if (c && c.secretId && c.secretKey) {
-      return {
-        secretId: c.secretId,
-        secretKey: c.secretKey,
-        region: c.region || 'ap-guangzhou',
-      };
+    const c = JSON.parse(v) as Partial<OcrCredential & { cachedAt?: number }>;
+    if (!c || !c.secretId || !c.secretKey) return null;
+    if (typeof c.cachedAt === 'number' && Date.now() - c.cachedAt > CREDENTIAL_TTL_MS) {
+      console.log('[ocrCredential] 密钥缓存已过期，将回源刷新');
+      return null;
     }
+    return {
+      secretId: c.secretId,
+      secretKey: c.secretKey,
+      region: c.region || 'ap-guangzhou',
+    };
   } catch {
     /* 损坏则视为无缓存 */
   }
   return null;
 }
 
-/** 写入本机缓存（cache_meta 表，key=ocr_credential），与项目既有 kv 存储风格一致 */
+/** 写入本机缓存（cache_meta 表，key=ocr_credential），并打上写入时间戳供 TTL 判断 */
 export function saveCredential(cred: OcrCredential): void {
-  setMeta(OCR_CREDENTIAL_KEY, JSON.stringify(cred));
+  setMeta(OCR_CREDENTIAL_KEY, JSON.stringify({ ...cred, cachedAt: Date.now() }));
 }
 
 /**
@@ -102,7 +107,7 @@ export async function recognizeOcr(
   const full = normalizeBaseUrl(baseUrl);
   const token = await getApiToken();
 
-  // a. 先读缓存；缓存没有且能连后端则刷新
+  // a. 先读缓存；缓存没有（或已过期）且能连后端则刷新
   let cred = getCachedCredential();
   if (!cred) {
     try {
@@ -110,18 +115,24 @@ export async function recognizeOcr(
       if (c) {
         cred = c;
         saveCredential(c);
+      } else {
+        // 后端未配置密钥 / 未开启直连：不报错，交给下方回退
+        console.log('[recognizeOcr] 后端未下发直连密钥，跳过腾讯云直连');
       }
-    } catch {
-      /* 静默：后端不可达时直连也无凭据，下面回退 */
+    } catch (e: any) {
+      // 不静默吞掉：明确记录，便于排查「店铺电脑不可达」导致直连一直被跳过
+      console.warn('[recognizeOcr] 拉取 OCR 密钥失败，将回退后端代理：', e?.message || e);
     }
   }
 
   // b. 直连优先
+  let directError: OcrError | Error | null = null;
   if (cred) {
     try {
       const r = await recognizeWithTencentDirect(pure, cred);
       return { text: r.text, lines: r.lines, engine: 'tencent-direct' };
     } catch (e: any) {
+      directError = e instanceof Error ? e : new Error(e?.message || String(e));
       console.warn('[recognizeOcr] 腾讯云直连失败，回退后端代理：', e?.message || e);
     }
   }
@@ -134,7 +145,15 @@ export async function recognizeOcr(
       body: JSON.stringify({ data: dataUrl }),
     });
   } catch (e: any) {
-    throw new Error(e?.message || '识别请求失败：请确认已连接店铺服务器');
+    // 后端代理不可达（店铺电脑关机 / WiFi 未连 / 地址填错 / 30s 超时）：
+    // 不把原始 e.message（可能是底层 Java/okhttp 栈）透给用户，只给可操作文案 + 分类码。
+    const detail = directError
+      ? `（腾讯云直连也失败了：${directError instanceof OcrError ? directError.friendlyMessage : (directError.message || '未知原因')}）`
+      : '';
+    throw new OcrError(
+      'LAN_UNREACHABLE',
+      `识别失败：未连接到店铺电脑。请确认：①手机已连店铺 WiFi；②「设置」里服务器地址填写正确；③店铺电脑已开机且 3001 服务在运行。${detail}`
+    );
   }
 
   if (!res.ok) {

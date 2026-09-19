@@ -4,6 +4,32 @@ export type OcrCredential = { secretId: string; secretKey: string; region?: stri
 
 export type DirectOcrResult = { text: string; lines: { text: string; confidence?: number }[] };
 
+/** OCR 链路错误分类码，供 UI 区分「店铺电脑不可达 / 网络异常 / 腾讯云直连失败」等场景 */
+export type OcrErrorCode =
+  | 'LAN_UNREACHABLE'
+  | 'NETWORK'
+  | 'TENCENT_DIRECT_FAILED'
+  | 'INVALID_RESPONSE'
+  | 'UNKNOWN';
+
+/**
+ * 带分类码的 OCR 错误。code 用于应用层（EntryForm）决定提示文案与重试策略；
+ * friendlyMessage 为对客可读文案，绝不携带底层 Java/okhttp 原始栈。
+ */
+export class OcrError extends Error {
+  code: OcrErrorCode;
+  friendlyMessage: string;
+  constructor(code: OcrErrorCode, friendlyMessage: string) {
+    super(friendlyMessage);
+    this.name = 'OcrError';
+    this.code = code;
+    this.friendlyMessage = friendlyMessage;
+  }
+}
+
+/** 直连腾讯云的最大等待时间：弱网下避免 fetch 静默挂起 */
+const TENCENT_DIRECT_TIMEOUT_MS = 20000;
+
 const OCR_HOST = 'ocr.tencentcloudapi.com';
 const OCR_ENDPOINT = 'https://ocr.tencentcloudapi.com';
 const OCR_ACTION = 'GeneralAccurateOCR';
@@ -87,6 +113,8 @@ export async function recognizeWithTencentDirect(
   const region = cred.region || 'ap-guangzhou';
 
   let res: Response;
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), TENCENT_DIRECT_TIMEOUT_MS);
   try {
     res = await fetch(OCR_ENDPOINT, {
       method: 'POST',
@@ -99,9 +127,18 @@ export async function recognizeWithTencentDirect(
         'X-TC-Region': region,
       },
       body,
+      signal: controller.signal,
     });
   } catch (e: any) {
-    throw new Error(`腾讯云直连请求失败：${e?.message || e}`);
+    if (e && e.name === 'AbortError') {
+      throw new OcrError(
+        'NETWORK',
+        `腾讯云直连超时（${TENCENT_DIRECT_TIMEOUT_MS / 1000} 秒），请检查手机网络后重试。`
+      );
+    }
+    throw new OcrError('NETWORK', `腾讯云直连请求失败：${e?.message || '网络异常'}`);
+  } finally {
+    clearTimeout(abortTimer);
   }
 
   let json: any = {};
@@ -109,15 +146,16 @@ export async function recognizeWithTencentDirect(
     const text = await res.text();
     json = text ? JSON.parse(text) : {};
   } catch (e: any) {
-    throw new Error(`腾讯云响应解析失败（HTTP ${res.status}）`);
+    throw new OcrError('INVALID_RESPONSE', `腾讯云响应解析失败（HTTP ${res.status}）`);
   }
 
   const resp = json?.Response;
   if (!resp) {
-    throw new Error(`腾讯云返回异常（HTTP ${res.status}）：缺少 Response 字段`);
+    throw new OcrError('INVALID_RESPONSE', `腾讯云返回异常（HTTP ${res.status}）：缺少 Response 字段`);
   }
   if (resp.Error) {
-    throw new Error(
+    throw new OcrError(
+      'TENCENT_DIRECT_FAILED',
       `腾讯云识别失败：${resp.Error.Message || resp.Error.Code || '未知错误'}`
     );
   }
