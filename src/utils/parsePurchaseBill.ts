@@ -325,8 +325,40 @@ function isProductNameLine(line: string): boolean {
   return true;
 }
 
-function cleanName(name: string): string {
-  return name
+/** cleanName 的可信行上下文：用于前导噪声剥离的「保守门禁」。 */
+export interface CleanNameCtx {
+  barcode?: string;
+  quantity?: number;
+  amount?: number;
+}
+
+// 前导中文噪声剥离——总开关与阈值，便于线上一键回退：
+// ① stripLeadingNoise=false 整体关闭；② leadingNoiseMaxChars 限制最多剥几个字。
+const NAME_CLEAN_CFG = { stripLeadingNoise: true, leadingNoiseMaxChars: 3 };
+
+// 观测到的「相邻列/表头串味」前导噪声词典（均为客户/收货人/店名等 bleed 片段，
+// 不含任何真实品牌前缀，故命中即剥离、零误伤）。遇新型串味在此追加即可。
+const LEADING_NOISE_PREFIXES = ['飞豪柒', '酈国洪'];
+
+// 前导中文噪声：OCR 列式/相邻列串味时，商品名前部会粘上「客户/收货人/店名」等片段
+// （如「飞豪柒精三鲜糯米锅巴」「酈国洪等你下课红和黄」）。剥离策略刻意保守：
+//  · 仅在可信商品行（已抽到条码/数量/金额 任一）才尝试，低置信度行不动；
+//  · 仅命中精确噪声词典才剥，绝不靠模糊规则猜，避免误删「蒙乐精三鲜…」等正常品名。
+function stripLeadingNoise(name: string, ctx?: CleanNameCtx): string {
+  if (!NAME_CLEAN_CFG.stripLeadingNoise || !name) return name;
+  const wellFormed = !!(ctx && (ctx.barcode || ctx.quantity != null || ctx.amount != null));
+  if (!wellFormed) return name;
+  for (const p of LEADING_NOISE_PREFIXES) {
+    if (p.length === 0 || p.length > NAME_CLEAN_CFG.leadingNoiseMaxChars) continue;
+    if (name.startsWith(p) && name.length > p.length && /[一-龥]/.test(name.slice(p.length))) {
+      return name.slice(p.length).replace(/^\s+/, '');
+    }
+  }
+  return name;
+}
+
+function cleanName(name: string, ctx?: CleanNameCtx): string {
+  let n = name
     .replace(/[【】\[\]()（）\|｜]/g, '')
     .replace(/\d+\s*[*xX×]\s*\d+/g, ' ')
     .replace(/^\d+\s*[.、]\s+/, ' ')
@@ -338,6 +370,8 @@ function cleanName(name: string): string {
     .replace(/\s+\d{2,4}$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+  n = stripLeadingNoise(n, ctx);
+  return n.replace(/\s+/g, ' ').trim();
 }
 
 // 常见 OCR 丢字/单据简写修复：把「500m可口可乐」补成「500ml可口可乐」，「1.25可口可乐」补成「1.25升可口可乐」
@@ -355,6 +389,116 @@ function normalizeOcrName(name: string): string {
 // 口味/水果/颜色词：单独出现时可能是「500ml芬达[蜜桃]」被 OCR 拆散后的残片
 
 
+// ─────────────────────────────────────────────────────────────────────────
+// 供应商模糊匹配（从 @sucen/ocr-core 1.0.2 tgz 移植，保持与 PC 端行为一致）
+// 用于 OCR 识别出的供应商名（可能为简称/关键字，如「亚昌冷饮」）与供应商库
+// 全称（如「鸣凰亚昌批发冷饮」）做模糊匹配，命中则带出登记全称。
+// ─────────────────────────────────────────────────────────────────────────
+const NAME_NOISE_RE = /[\s（）()【】\[\]「」『』""''·、,，.。:：;；\-_/\\|｜*＊#＃]/g;
+const NAME_SUFFIX_RE =
+  /(有限责任公司|股份有限公司|分公司|公司|商行|商贸|贸易|批发部|经营部|门市部|专卖店|直销点|超市|便利店|百货)/g;
+const SUPPLIER_INVALID_RE =
+  /(合计|总计|小计|金额|数量|单价|备注|页码|地址|电话|日期|单号|编号|客户|送货人|业务员|制单|开户|银行|账号|谢谢|欢迎|热线)/;
+
+function levenshtein(a: string, b: string): number {
+  const s1 = Array.from(a || '');
+  const s2 = Array.from(b || '');
+  if (s1.length === 0) return s2.length;
+  if (s2.length === 0) return s1.length;
+  let long = s1;
+  let short = s2;
+  if (short.length > long.length) [long, short] = [short, long];
+  let prev = new Array(short.length + 1);
+  let curr = new Array(short.length + 1);
+  for (let j = 0; j <= short.length; j++) prev[j] = j;
+  for (let i = 1; i <= long.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= short.length; j++) {
+      const cost = long[i - 1] === short[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[short.length];
+}
+
+function similarity(a: string, b: string): number {
+  const s1 = (a || '').trim();
+  const s2 = (b || '').trim();
+  if (!s1 && !s2) return 1;
+  if (!s1 || !s2) return 0;
+  const maxLen = Math.max(Array.from(s1).length, Array.from(s2).length);
+  if (maxLen === 0) return 1;
+  return 1 - levenshtein(s1, s2) / maxLen;
+}
+
+function normalizeNameForCompare(name: string): string {
+  return (name || '').replace(NAME_NOISE_RE, '').replace(NAME_SUFFIX_RE, '').trim();
+}
+
+function cleanDisplayName(name: string): string {
+  return (name || '')
+    .replace(/^[\s:：、,，.。\-_]+/, '')
+    .replace(/[\s:：、,，]+$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function charsAllCovered(shortStr: string, longStr: string): boolean {
+  const s = shortStr || '';
+  const l = longStr || '';
+  if (!s || !l || s.length > l.length) return false;
+  const pool = new Set(Array.from(l));
+  return Array.from(s).every((ch) => pool.has(ch));
+}
+
+/**
+ * 供应商模糊匹配：OCR 名与供应商库做模糊匹配，命中返回 { item, score }，否则 undefined。
+ * 算法（与 @sucen/ocr-core 1.0.2 一致）：
+ *   全等=1 > 双向包含(0.75+) > 字符全覆盖(0.75+) > 编辑距离相似度(similarity)。
+ * 仅当 score >= threshold(默认 0.62) 才视为命中，避免低置信误带出供应商。
+ */
+export function matchSupplier<T>(
+  ocrName: string,
+  suppliers: T[],
+  getName: (item: T) => string,
+  threshold = 0.62
+): { item: T; score: number } | undefined {
+  const raw = cleanDisplayName(ocrName || '');
+  if (!raw || suppliers.length === 0) return undefined;
+  if (SUPPLIER_INVALID_RE.test(raw)) return undefined;
+  const target = normalizeNameForCompare(raw);
+  if (!target) return undefined;
+  let best: { item: T; score: number } | undefined;
+  for (const item of suppliers) {
+    const candidate = normalizeNameForCompare(getName(item) || '');
+    if (!candidate) continue;
+    let score = 0;
+    const minLen = Math.min(candidate.length, target.length);
+    const maxLen = Math.max(candidate.length, target.length);
+    if (candidate === target) {
+      score = 1;
+    } else if (candidate.includes(target) || target.includes(candidate)) {
+      score = 0.75 + 0.2 * (minLen / maxLen);
+    } else if (
+      minLen >= 2 &&
+      charsAllCovered(
+        minLen === candidate.length ? candidate : target,
+        minLen === candidate.length ? target : candidate
+      )
+    ) {
+      score = 0.75 + 0.1 * (minLen / maxLen);
+    } else {
+      score = similarity(candidate, target);
+    }
+    if (score >= Math.max(threshold, 0) && (!best || score > best.score)) {
+      best = { item, score };
+    }
+  }
+  return best && best.score >= threshold ? best : undefined;
+}
+
+
 // 预扫描所有「每页小计/合计/总计」的金额，item 识别时排除这些页级数字
 
 // 列式表格：OCR 把横向表格按列拆成每行一个单元格。
@@ -362,7 +506,9 @@ function normalizeOcrName(name: string): string {
 // 数据按列依次输出。此函数识别这种结构并直接组合成商品。
 const COLUMNAR_END_RE = /^(合计|总计|小计|制单|备注|送货|收货|页码|地址|电话|客户|业务员)/;
 
-function findColumnarDataStart(lines: string[]): number {
+// 返回列式数据起始行（最后一个列名之后）以及是否识别到「单位」列。
+// 识别到单位列时，parseColumnarGroup 会把该列独立成行的单位词映射到明细 unit。
+function findColumnarDataStart(lines: string[]): { start: number; hasUnit: boolean } | null {
   // OCR 输出的表头可能是每个列名单词各占一行，不会在单行内。
   // 在 15 行窗口内同时出现多个列名关键词，即认为是列式表头。
   for (let i = 0; i < lines.length - 8; i++) {
@@ -381,13 +527,13 @@ function findColumnarDataStart(lines: string[]): number {
       for (let j = i; j < Math.min(i + 15, lines.length); j++) {
         if (COLUMN_HEADERS.test(lines[j].trim())) lastHeaderIdx = j;
       }
-      return lastHeaderIdx + 1;
+      return { start: lastHeaderIdx + 1, hasUnit };
     }
   }
-  return -1;
+  return null;
 }
 
-function parseColumnarGroup(group: string[]): BillItem | null {
+function parseColumnarGroup(group: string[], hasUnitCol = false): BillItem | null {
   const barcode = extractBarcode(group.join(' '));
 
   // 名称：含中文且不是单位/合计大写/页脚文字
@@ -404,7 +550,7 @@ function parseColumnarGroup(group: string[]): BillItem | null {
       name = candidate;
     }
   }
-  name = normalizeOcrName(cleanName(name));
+  name = normalizeOcrName(cleanName(name, { barcode }));
   if (!name) return null;
 
   // 数量与单位
@@ -416,6 +562,35 @@ function parseColumnarGroup(group: string[]): BillItem | null {
       quantity = Number(m[1]);
       unit = m[2];
       break;
+    }
+  }
+
+  // 单位列映射：列式单据里「单位」常单独成列（箱/瓶…），与数字不同行，
+  // UNIT_RE 取不到。识别到单位列时，把组内独立成行的单位词映射到 unit，
+  // 兼容非列式（UNIT_RE 已取到单位则跳过，不影响既有行为）。
+  if (hasUnitCol && !unit) {
+    for (const l of group) {
+      const um = l.trim().match(/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/);
+      if (um) {
+        unit = um[1];
+        break;
+      }
+    }
+  }
+
+  // 数量列提取：列式单据「数量」紧跟「单位」列之后，常为裸整数（与序号不同行），
+  // UNIT_RE 取不到。识别到单位列时，取单位单元格之后的第一个纯数字单元格作为数量。
+  // 仅在区间列（hasUnitCol）且 UNIT_RE 未取到数量时生效，非列式行为不变。
+  if (hasUnitCol && quantity == null) {
+    const uIdx = group.findIndex((l) => /^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/.test(l.trim()));
+    if (uIdx >= 0) {
+      for (let k = uIdx + 1; k < group.length; k++) {
+        const qm = group[k].trim().match(/^(\d+(?:\.\d+)?)$/);
+        if (qm) {
+          quantity = Number(qm[1]);
+          break;
+        }
+      }
     }
   }
 
@@ -472,39 +647,71 @@ function parseColumnarGroup(group: string[]): BillItem | null {
 }
 
 function tryParseColumnarTable(lines: string[]): BillItem[] | null {
-  const dataStart = findColumnarDataStart(lines);
-  if (dataStart < 0) return null;
+  const found = findColumnarDataStart(lines);
+  if (!found || found.start < 0) return null;
+  const dataStart = found.start;
+  const hasUnitCol = found.hasUnit;
 
   const items: BillItem[] = [];
   let i = dataStart;
+  // 序号连续性判定：真实单据的序号严格递增（1,2,3…），而数量多为裸整数（2/6/12…）。
+  // 旧逻辑用 /^\\d{1,3}$/ 把每个裸整数都当序号 → 数量被误判为新组起点，截断分组、丢行丢条码。
+  // 现改为：维护 expectedSeq，仅当裸整数 n === expectedSeq 且位于组首/组边界时才判为序号，
+  // 否则归入当前组（视作数量等），不再开新组。序号跳号/重复按非序号处理（保守）。
+  let expectedSeq = 1;
+  let group: string[] = []; // 当前正在归并的商品组（含其序号行）
+
+  const flush = () => {
+    if (group.length > 0) {
+      const item = parseColumnarGroup(group.map((l) => l.trim()).filter(Boolean), hasUnitCol);
+      if (item) items.push(item);
+      group = [];
+    }
+  };
+
   while (i < lines.length) {
     const line = lines[i].trim();
-    if (!line || COLUMN_HEADERS.test(line) || COLUMNAR_END_RE.test(line)) {
+    if (!line) {
       i++;
       continue;
     }
-    // 商品记录以序号（纯小数字）开头；遇到下一行是另一个序号或结束标记时截断
-    if (/^\d{1,3}$/.test(line)) {
-      const start = i;
-      let end = i + 1;
-      while (end < lines.length) {
-        const next = lines[end].trim();
-        if (!next) {
-          end++;
-          continue;
-        }
-        if (/^\d{1,3}$/.test(next)) break;
-        if (COLUMNAR_END_RE.test(next)) break;
-        end++;
-      }
-      const group = lines.slice(start, end).map((l) => l.trim()).filter(Boolean);
-      const item = parseColumnarGroup(group);
-      if (item) items.push(item);
-      i = end;
-    } else {
+    // 表头残留 / 结束标记：截断当前组，不视为新序号
+    if (COLUMN_HEADERS.test(line) || COLUMNAR_END_RE.test(line)) {
+      flush();
       i++;
+      continue;
     }
+
+    const seqM = line.match(/^(\d{1,3})$/);
+    if (seqM) {
+      const n = Number(seqM[1]);
+      if (group.length === 0) {
+        // 首个裸整数 = 本表第一个序号（不一定从 1 开始），据此播种 expectedSeq
+        group = [line];
+        expectedSeq = n + 1;
+        i++;
+        continue;
+      }
+      if (n === expectedSeq) {
+        // 序号连续性命中：结束上一组，开启新组
+        flush();
+        group = [line];
+        expectedSeq = n + 1;
+        i++;
+        continue;
+      }
+      // 不匹配连续性 → 视作数量等数值单元格，归入当前组，不再开新组
+      group.push(line);
+      i++;
+      continue;
+    }
+
+    // 其它单元格（编码/名称/单位/金额/条码…）归入当前组
+    group.push(line);
+    i++;
   }
+  flush();
+
   return items.length > 0 ? items.slice(0, 50) : null;
 }
 
