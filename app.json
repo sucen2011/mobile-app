@@ -3,7 +3,7 @@
     "name": "商超台账",
     "slug": "mobile-app",
     "owner": "sucen2011s-team",
-    "version": "1.1.2",
+    "version": "1.1.3",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "com.retail.ledger",
-      "versionCode": 13,
+      "versionCode": 14,
       "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",

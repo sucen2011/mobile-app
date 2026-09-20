@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, View, Text, TextInput, TouchableOpacity, ScrollView, Alert } from 'react-native';
 import { useTheme } from '../theme/ThemeProvider';
 import { DEVICE_ID, getApiToken, type SyncPrefs } from '../config';
+import { APP_VERSION, APP_VERSION_CODE } from '../version';
 import { getLastSync } from '../db/localDb';
 import { SyncBadge, resolveSyncPhase } from '../components/SyncUI';
 import { SafeAreaHeader } from '../components/SafeArea';
@@ -151,7 +152,7 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
         <Text style={styles.cardTitle}>关于</Text>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>版本</Text>
-          <Text style={styles.rowValue}>v1.0</Text>
+          <Text style={styles.rowValue}>{`v${APP_VERSION}（${APP_VERSION_CODE}）`}</Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>设备标识</Text>

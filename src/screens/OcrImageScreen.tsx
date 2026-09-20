@@ -15,8 +15,10 @@ import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
 import { useTheme } from '../theme/ThemeProvider';
 import ScanFrame from '../components/ScanFrame';
 import { recognizeOcr } from '../api/ocrCredential';
-import { parseOcrText, type OcrResult, type NutritionItem } from '@sucen/ocr-core';
-import { mockOcr } from '@sucen/ocr-core';
+// 改用**本地** ocrParse / ocrMock：原先从 '@sucen/ocr-core' 导入，而 vendor 里的 tgz 是 2026-09-06 的旧产物
+// （包内无源码、无法重打包）。本地 src/utils/ocrParse.ts 与 PC 侧同期，是更可信的来源。
+import { parseOcrText, type OcrResult, type NutritionItem } from '../utils/ocrParse';
+import { mockOcr } from '../utils/ocrMock';
 import { insertOcrCard, listOcrCards, deleteOcrCard, type OcrCard } from '../db/localDb';
 
 type ViewName = 'main' | 'edit' | 'view';

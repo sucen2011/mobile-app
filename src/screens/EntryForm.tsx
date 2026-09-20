@@ -12,7 +12,12 @@ import { DEVICE_ID } from '../config';
 import { fetchSuppliers } from '../api/suppliers';
 import { recognizeOcr } from '../api/ocrCredential';
 import { toLocalDateStr } from '../utils/dateLabel';
-import { parsePurchaseBill, matchSupplier } from '@sucen/ocr-core';
+// 进货单解析器：改用**本地修复版**（09-12 金达版式 15/15 那批修复）。
+// 原先从 '@sucen/ocr-core' 导入，而 vendor 里那个 tgz 构建于 2026-09-06，
+// 早于 09-12 的解析器重写（条码粘连拆分 / 数值归位 / 锚点聚合），导致手机上品名带噪声、单位空、出现 ¥0.00 行。
+// matchSupplier 是版本稳定的字符串匹配工具，仍走包内实现。
+import { parsePurchaseBill } from '../utils/parsePurchaseBill';
+import { matchSupplier } from '@sucen/ocr-core';
 import DatePickerField from '../components/DatePickerField';
 // ⚠️ 必须用 /legacy 子入口：SDK 54 主入口的 readAsStringAsync 是调用即抛的弃用桩
 import * as FileSystem from 'expo-file-system/legacy';
