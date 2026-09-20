@@ -398,6 +398,12 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
               const isConsignRebate = isConsign && e.returnType === 2;
               // 结算时机：1=现给 2=到期给。现给返货已当场结清，不应按「返完 N 期」口径显示。
               const isNow = e.settlementTiming === 1;
+              // 到期提醒：返货优先取下次返货日（无则到期时间），其余取到期日（寄售取货物处置到期日）
+              const expDate = isRebate
+                ? (e.nextRebateDate || e.maturityDate)
+                : (isConsign ? e.maturityDate : e.dueDate);
+              const daysLeft = expDate ? Math.ceil((new Date(expDate).getTime() - Date.now()) / 86400000) : null;
+              const expiringSoon = daysLeft != null && daysLeft >= 0 && daysLeft <= 30;
               // 寄售返货（returnType=2）的数量存放在 consignReturnItems（多行返货商品），不在 rebateQty。
               const consignReturnTotalQty = isConsignRebate
                 ? (Array.isArray(e.consignReturnItems) ? e.consignReturnItems : []).reduce(
@@ -461,7 +467,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                       {!isRebate && Array.isArray(e.planJson) && e.planJson.length > 0 ? (
                         <Text style={styles.planListTag}>{`已 ${e.planJson.filter((p) => p.status === 1).length}/${e.planJson.length} 期`}</Text>
                       ) : null}
-                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : <Text style={styles.methodTag}>{isConsign ? (isConsignRebate ? (isNow ? '返货' : '到期返货') : (isNow ? '返钱' : '到期返钱')) : isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
+                      {e.overdue ? <Text style={styles.overdueTag}>逾期</Text> : expiringSoon ? <Text style={styles.soonTag}>即将到期</Text> : <Text style={styles.methodTag}>{isConsign ? (isConsignRebate ? (isNow ? '返货' : '到期返货') : (isNow ? '返钱' : '到期返钱')) : isRebate ? '返货' : SETTLE_METHOD_LABEL[e.settleMethod as SettleMethod]}</Text>}
                     </View>
                   </TouchableOpacity>
                   <View style={styles.itemActions}>
@@ -1087,6 +1093,11 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   );
   const [expenseDate, setExpenseDate] = useState(e?.expenseDate || todayStr());
   const [dueDate, setDueDate] = useState(e?.dueDate || '');
+  // 现给（settlementTiming=1）费用覆盖期：开始时间 / 到期时间，返钱与返货通用，提交时按类型映射
+  const [startDate, setStartDate] = useState(e?.startDate || todayStr());
+  const [endDate, setEndDate] = useState(
+    e ? (e.expenseType === 2 ? (e.maturityDate || '') : (e.dueDate || '')) : ''
+  );
   const [amount, setAmount] = useState(e && e.totalAmount ? e.totalAmount.toFixed(2) : '');
   // 返钱分期计划（与 PC 端结算计划段对齐；planAmount 草稿期允许字符串，提交时强转数字）
   const [planMode, setPlanMode] = useState<boolean>(Array.isArray(e?.planJson) && e!.planJson.length > 0);
@@ -1407,8 +1418,26 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       }
     } else if (expenseType === 2) {
       // 返货：关联商品（可手填，无匹配则 productId=0）、无单价、不折算金额
-      const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
-      if (rebateSettleMode === 2) {
+      if (settlementTiming === 1) {
+        // 现给返货：当场一次性收齐实物，强制标量通道；开始时间→rebateStartDate，到期时间→maturityDate
+        if (!startDate.trim()) { onError('请选择开始时间'); return; }
+        if (!endDate.trim()) { onError('请选择到期时间'); return; }
+        if (!productName.trim()) { onError('返货需填写关联商品（无匹配可手填）'); return; }
+        const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
+        if (rq <= 0) { onError('返货需填写每期数量（大于 0）'); return; }
+        payload.settleMethod = 3;
+        payload.productId = productId;
+        payload.productName = productName.trim();
+        payload.rebateCycle = rebateCycle;
+        payload.rebateQty = rq;
+        payload.rebateUnit = '件';
+        payload.rebateStartDate = startDate.trim().slice(0, 10);
+        payload.maturityDate = endDate.trim().slice(0, 10);
+        payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
+        payload.startDate = startDate.trim().slice(0, 10);
+      } else {
+        const rq = Number(rebateQty.replace(/[^0-9.]/g, '')) || 0;
+        if (rebateSettleMode === 2) {
         // 按计划分期：每期各自商品（uniform 模板各期相同 / custom 各期独立），校验每期日期/商品/数量/严格递增
         const plan = rebatePlanPeriods.map((p) => ({ ...p }));
         if (plan.length === 0) { onError('请先选择快速模板生成返货计划'); return; }
@@ -1463,12 +1492,16 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         payload.maturityDate = maturityDate.trim() ? maturityDate.trim().slice(0, 10) : '';
         payload.rebateTotalPeriods = rebateTotalPeriods.trim() ? Math.max(0, Math.floor(Number(rebateTotalPeriods.replace(/[^0-9.]/g, '')) || 0)) : 0;
       }
+      }
     } else {
       // 返钱：金额模型 或 分期计划
       if (settlementTiming === 1) {
-        // 现给：强制按次、当场一次性付清，无到期日 / 无分期计划
+        // 现给：强制按次、当场一次性付清，但记录费用覆盖期（开始时间→startDate，到期时间→dueDate）
+        if (!startDate.trim()) { onError('请选择开始时间'); return; }
+        if (!endDate.trim()) { onError('请选择到期时间'); return; }
         payload.settleMethod = 3;
-        payload.dueDate = undefined;
+        payload.startDate = startDate.trim().slice(0, 10);
+        payload.dueDate = endDate.trim().slice(0, 10);
         payload.planJson = [];
         const a = Number(amount.replace(/[^0-9.]/g, '')) || 0;
         if (a <= 0) { onError('金额需大于 0'); return; }
@@ -1696,7 +1729,13 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 </View>
               </>
             ) : (
-              <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4 }}>现给：当场一次性付清，无到期日 / 分期</Text>
+              <View>
+                <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4, marginBottom: 6 }}>现给：当场一次性付清，同时记录费用覆盖期</Text>
+                <Text style={styles.fieldLabel}>开始时间 *</Text>
+                <DatePickerField value={startDate} onChange={setStartDate} title="开始时间" />
+                <Text style={styles.fieldLabel}>到期时间 *</Text>
+                <DatePickerField value={endDate} onChange={setEndDate} title="到期时间" />
+              </View>
             )}
             {!planMode ? (
               <>
@@ -1834,7 +1873,15 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                   </TouchableOpacity>
                 </View>
               </>
-            ) : null}
+            ) : (
+              <View>
+                <Text style={{ fontSize: 12, color: theme.color.textAppTertiary, marginTop: 4, marginBottom: 6 }}>现给：当场一次性收齐实物，同时记录费用覆盖期</Text>
+                <Text style={styles.fieldLabel}>开始时间 *</Text>
+                <DatePickerField value={startDate} onChange={setStartDate} title="开始时间" />
+                <Text style={styles.fieldLabel}>到期时间 *</Text>
+                <DatePickerField value={endDate} onChange={setEndDate} title="到期时间" />
+              </View>
+            )}
 
             {rebateSettleMode === 2 ? (
               <View>
@@ -1999,19 +2046,21 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                     <TextInput style={styles.input} value={rebateTotalPeriods} keyboardType="numeric" onChangeText={(v: string) => { const c = v.replace(/[^0-9.]/g, ''); setRebateTotalPeriods(c); if (Number(c) === 0) setMaturityDate(''); }} placeholder="如 12" placeholderTextColor={theme.color.textAppTertiary} />
                   </View>
                 </View>
-                <View style={styles.dualRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.fieldLabel}>首期日期</Text>
-                    <DatePickerField value={rebateStartDate} onChange={setRebateStartDate} title="首期日期" />
+                {settlementTiming === 2 ? (
+                  <View style={styles.dualRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.fieldLabel}>首期日期</Text>
+                      <DatePickerField value={rebateStartDate} onChange={setRebateStartDate} title="首期日期" />
+                    </View>
+                    <View style={{ width: 12 }} />
+                    <View style={{ flex: 1 }}>
+                      {/* 长期不限 = rebateTotalPeriods 填 0 + maturityDate 留空；maturityDate 为 DATE 不可存 0。
+                         期限数=0（长期）时到期时间禁用并清空，杜绝「长期」与「具体到期日」并存 */}
+                      <Text style={styles.fieldLabel}>到期时间（留空 = 长期不限）</Text>
+                      <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（留空 = 长期不限）" allowEmpty disabled={Number(rebateTotalPeriods) === 0} />
+                    </View>
                   </View>
-                  <View style={{ width: 12 }} />
-                  <View style={{ flex: 1 }}>
-                    {/* 长期不限 = rebateTotalPeriods 填 0 + maturityDate 留空；maturityDate 为 DATE 不可存 0。
-                       期限数=0（长期）时到期时间禁用并清空，杜绝「长期」与「具体到期日」并存 */}
-                    <Text style={styles.fieldLabel}>到期时间（留空 = 长期不限）</Text>
-                    <DatePickerField value={maturityDate} onChange={setMaturityDate} title="到期时间（留空 = 长期不限）" allowEmpty disabled={Number(rebateTotalPeriods) === 0} />
-                  </View>
-                </View>
+                ) : null}
               </>
             )}
           </View>
@@ -2918,6 +2967,7 @@ function makeStyles(theme: any) {
     itemConsignInfo: { fontSize: 12, color: theme.color.primaryVivid, backgroundColor: theme.color.primarySoft, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, marginTop: theme.spaceScale[2], fontWeight: theme.font.weight.medium },
     itemFoot: { flexDirection: 'row', alignItems: 'center', gap: theme.spaceScale[2], marginTop: theme.spaceScale[2] },
     overdueTag: { fontSize: 12, color: '#fff', backgroundColor: theme.color.danger, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, fontWeight: theme.font.weight.medium },
+    soonTag: { fontSize: 12, color: theme.color.ctaText, backgroundColor: theme.color.warning, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, fontWeight: theme.font.weight.medium },
     methodTag: { fontSize: 12, color: theme.color.textAppTertiary },
     settlePill: { flex: 1, backgroundColor: theme.color.primaryVivid, alignItems: 'center', justifyContent: 'center', paddingVertical: 10 },
     settlePillText: { color: '#fff', fontSize: 14, fontWeight: theme.font.weight.medium },

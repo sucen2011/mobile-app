@@ -75,6 +75,8 @@ export interface SupplierExpense {
   settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售现给/到期给皆可）
   expenseDate: string;
   dueDate: string;
+  // 费用覆盖期开始时间（新增列 start_date）：现给时记录，返钱/返货通用；与 PC 对齐
+  startDate?: string;
   totalAmount: number;
   settledAmount: number;
   unsettledAmount: number;
@@ -239,6 +241,7 @@ export type ExpensePayload = {
   settlementTiming?: SettlementTiming;  // 结算时机：1=现给 2=到期给（寄售现给/到期给皆可）
   expenseDate: string;
   dueDate?: string;
+  startDate?: string;                   // 费用覆盖期开始时间：现给时必填，返钱/返货通用
   totalAmount?: number;
   remark?: string;
   // 返货（expenseType=2）：关联商品档案、无单价、不折算金额
