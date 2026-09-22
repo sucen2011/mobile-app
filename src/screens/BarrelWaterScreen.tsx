@@ -28,6 +28,9 @@ const VIEW_TITLES: Record<Exclude<ViewKey, 'main'>, string> = {
   query: '客户查询',
 };
 
+// 按桶类型的「现有库存」卡（对齐 PC 端 BarrelDashboard：18L云湾桶 / 18L送福桶 / 18L高路达桶）
+const STOCK_TYPES = ['18L云湾桶', '18L送福桶', '18L高路达桶'] as const;
+
 function uuid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
@@ -70,6 +73,12 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
   useEffect(() => { refresh(); }, [cacheVersion]);
 
   const summary = useMemo(() => getBarrelSummary(), [tick]);
+  // 按桶类型的库存行（与 PC 一致：现有库存 = inStore - inUse）
+  const stockRows = useMemo(() => getAllBarrelStock(), [tick]);
+  const availableOf = (type: string) => {
+    const row = stockRows.find((s) => s.type === type);
+    return row ? row.inStore - row.inUse : 0;
+  };
 
   // ---- main ----
   if (view === 'main') {
@@ -86,6 +95,20 @@ export default function BarrelWaterScreen({ sync, cacheVersion, onSyncAll }: Pro
           <StatCard label="在押" value={summary.inUse} />
           <StatCard label="在库" value={summary.inStore} />
           <StatCard label="现有库存" value={summary.available} />
+        </View>
+
+        {/* 按桶类型的现有库存 ×3（对齐 PC 端 BarrelDashboard）*/}
+        <View style={styles.typeStockRow}>
+          {STOCK_TYPES.map((tp) => (
+            <View key={tp} style={styles.typeStockCard}>
+              <Text style={styles.typeStockTitle}>{tp}</Text>
+              <Text style={styles.typeStockCaption}>现有库存</Text>
+              <Text style={[styles.typeStockValue, { fontFamily: theme.font.family.num }]}>
+                {availableOf(tp)}
+                <Text style={styles.typeStockUnit}> 桶</Text>
+              </Text>
+            </View>
+          ))}
         </View>
 
         <Text style={styles.sectionTitle}>快捷操作</Text>
@@ -843,6 +866,13 @@ function makeStyles(theme: any) {
     statCard: { flex: 1, backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[4], alignItems: 'center' },
     statValue: { fontSize: theme.font.sizeV4.metric, fontWeight: theme.font.weight.semibold, color: theme.color.textApp },
     statLabel: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginTop: 4 },
+    // 按桶类型的现有库存卡（对齐 PC 端 BarrelDashboard 的 3 张卡）
+    typeStockRow: { flexDirection: 'row', gap: theme.spaceScale[3], marginBottom: theme.spaceScale[4] },
+    typeStockCard: { flex: 1, backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, padding: theme.spaceScale[3] },
+    typeStockTitle: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppSecondary, fontWeight: '500' },
+    typeStockCaption: { fontSize: theme.font.sizeV4.caption, color: theme.color.textAppTertiary, marginTop: 2, marginBottom: 4 },
+    typeStockValue: { fontSize: theme.font.sizeV4.metric, fontWeight: theme.font.weight.semibold, color: theme.color.primaryVivid },
+    typeStockUnit: { fontSize: theme.font.sizeV4.caption, fontWeight: '400', color: theme.color.textAppSecondary },
     sectionTitle: { fontSize: theme.font.sizeV4.h4, fontWeight: theme.font.weight.semibold, color: theme.color.textApp, marginBottom: theme.spaceScale[3] },
     card: { backgroundColor: theme.color.surfaceApp, borderRadius: theme.radius.lg, paddingHorizontal: theme.spaceScale[4], marginBottom: theme.spaceScale[4] },
     actionRow: { flexDirection: 'row', alignItems: 'center', minHeight: S.listRowMinH, paddingVertical: 10, borderBottomWidth: 0 },

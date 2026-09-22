@@ -21,7 +21,8 @@
   "devDependencies": {
     "@types/crypto-js": "^4.2.2",
     "@types/react": "~19.2.4",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "^1.6.1"
   },
   "scripts": {
     "start": "expo start",

@@ -30,7 +30,28 @@ export interface PurchaseBill {
   note?: string;
   items: BillItem[];
   raw: string;
+  /** 命中并使用的单据版式（格式家族）。未识别版式走通用兜底时为 'generic' */
+  format?: string;
+  /** 解析过程中的告警（缺列/分页不全/低置信等），供前端提示用户人工核对 */
+  warnings?: string[];
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 多格式架构说明（如何新增一种单据版式）
+// ─────────────────────────────────────────────────────────────────────────
+// 每种单据版式 = 一个「格式族」，由 detect（判定） + extract（抽取）两个函数组成。
+// 所有格式族登记到下方 FORMAT_REGISTRY 有序数组里，parsePurchaseBill 按数组顺序
+// 依次 detect：命中则用该族的 extract 产出 PurchaseBill；全部未命中则走通用兜底
+// （现有 parseItems 逻辑），并写入 warnings 提示用户人工核对。
+//
+// 新增版式只需三步，无需改动既有解析逻辑：
+//   1) 写一个 detect(lines): boolean —— 用该版式独有的字样/表头判定（如「京东万商购物清单」）。
+//   2) 写一个 extract(lines): PurchaseBill —— 产出统一结构（含 items/total/format/warnings）。
+//      共用工具：extractBarcode / toNum / parseDate / cleanName / splitStuckBarcode 等。
+//   3) 把 { format, detect, extract } push 进 FORMAT_REGISTRY（顺序：特异性高的放前面）。
+//   4) 在 __tests__ 里加一份该版式的 OCR 原文回归用例（断言 format/明细数/关键明细/总额）。
+// 这样以后遇到新格式是「加一条」，而不是「改一处」。
+// ─────────────────────────────────────────────────────────────────────────
 
 const NUM_RE = /-?\d+(?:,\d{3})*(?:\.\d+)?/;
 
@@ -131,13 +152,16 @@ function stripSupplierNoise(name: string): string {
     }
   }
   // OCR 常把抬头/印章里的"中国"或残缺"国"字粘到公司名前；"AA" 是针式打印单顶部常见噪声
-  // 页码（第1/4页）也常粘到供应商名前
+  // 页码（第1/4页 / 1/1 / 当前第1页，共1页 等）也常粘到供应商名前
   return name
     .replace(/^AA\s*/, '')
     .replace(/^中国\s*/, '')
     .replace(/^国\s*/, '')
+    .replace(/^\d+\s*\/\s*\d+\s*/, '') // 分页标记（如 "1/1"）粘到抬头
     .replace(/^第\s*\d+\s*[\/]\s*\d+\s*页\s*/, '')
     .replace(/^第\s*\d+\s*页\s*/, '')
+    .replace(/^当前第\s*\d+\s*页(?:，?共\s*\d+\s*页)?/, '') // 京东万商等"当前第1页，共1页"粘到抬头
+    .replace(/^共\s*\d+\s*页/, '')
     .trim();
 }
 
@@ -245,48 +269,39 @@ function parseTotal(lines: string[]): number | undefined {
       if (maxDecimal != null) return maxDecimal;
     }
   }
-  // 单页单据 fallback：优先"总计/合计"，在其后 3 行内取最大金额
-  const totalHits: number[] = [];
+  // 单页单据：带标签的合计行（成交金额/应收金额/合计/总计/小计…）优先。
+  // 优先取「标签同行」的数字（如 "成交金额:48.00"），再向后看几行；
+  // 跳过地址/电话/手机号行，避免把门牌号(如 153-3)、电话号码误当合计。
+  const ADDR_NOISE =
+    /(地址|电话|手机|送货|客户|仓库|业务员|投诉|公司|校区|路|号|栋|室|广场|大厦|市场|斜对面|中学|小学|超市)/;
+  const isPhoneLine = (s: string) => {
+    const digits = s.replace(/\D/g, '');
+    return digits.length >= 7 && /^\d[\d\s-]+$/.test(s.replace(/\s/g, '')) === false ? false : digits.length >= 11;
+  };
+  const labeledTotalHits: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (/(总计|总金额|总额|合计|成交金额|应收金额|实收金额)/.test(l)) {
-      for (let j = 1; j <= 3 && i + j < lines.length; j++) {
-        const m = lines[i + j].match(NUM_RE);
-        if (m) {
-          const n = toNum(m[0]);
-          if (n != null && n > 0 && n < 100000) totalHits.push(n);
-        }
+    if (!/(总计|总金额|总额|合计|成交金额|应收金额|实收金额|小计)/.test(l)) continue;
+    const tryNum = (s: string) => {
+      const m = s.match(NUM_RE);
+      if (m) {
+        const n = toNum(m[0]);
+        if (n != null && n > 0 && n < 100000) labeledTotalHits.push(n);
       }
+    };
+    // 同行数字（标签后，如 "成交金额:48.00"）
+    const colonIdx = l.search(/[:：]/);
+    if (colonIdx >= 0) tryNum(l.slice(colonIdx + 1));
+    else tryNum(l.replace(/^[一-龥]+/, ''));
+    // 向后看，但跳过敏感行（地址/电话/纯长数字）
+    for (let j = 1; j <= 3 && i + j < lines.length; j++) {
+      const t = lines[i + j];
+      if (ADDR_NOISE.test(t)) continue;
+      if (isPhoneLine(t)) continue;
+      tryNum(t);
     }
   }
-  if (totalHits.length > 0) return Math.max(...totalHits);
-  // 兜底：普通小计
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (/(小计)/.test(l) && !/(页小计|本页小计)/.test(l)) {
-      let maxDecimal: number | undefined;
-      let maxInt: number | undefined;
-      for (let j = 1; j <= 4 && i + j < lines.length; j++) {
-        const target = lines[i + j];
-        const dm = target.match(/\b\d+\.\d+\b/);
-        if (dm) {
-          const n = toNum(dm[0]);
-          if (n != null && n > 0 && n < 100000) {
-            if (maxDecimal == null || n > maxDecimal) maxDecimal = n;
-          }
-        }
-        const im = target.match(/\b\d+\b/);
-        if (im) {
-          const n = toNum(im[0]);
-          if (n != null && n > 0 && n < 100000) {
-            if (maxInt == null || n > maxInt) maxInt = n;
-          }
-        }
-      }
-      if (maxDecimal != null) return maxDecimal;
-      if (maxInt != null) return maxInt;
-    }
-  }
+  if (labeledTotalHits.length > 0) return Math.max(...labeledTotalHits);
   return undefined;
 }
 
@@ -722,6 +737,60 @@ function tryParseColumnarTable(lines: string[]): BillItem[] | null {
 
 const UNIT_RE = /^(\d+(?:\.\d+)?)\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/;
 
+// ── 合并行（OCR 把「规格/数量/单位/单价/优惠」压进商品名或相邻行）──────────────
+// 真实针式小票常把多列挤在一行/相邻行。下方正则把 `规格? 数量 单位 单价 优惠` 扒出来：
+//   · 规格：N*N*N 或 N x N（如 1*14*30 / 1X24）
+//   · 数量+单位+单价(+优惠)：如 `1中包10.00 0.10` / `1箱48.00` / `1*37.00 0.31`
+// 单位词后若被 OCR 误读成 `*`（如 `1*37.00`），单位置空（不臆造）。
+// 仅当整段能完整匹配时才扒，避免误伤正常品名。
+const MERGED_UNIT = '中包|箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根';
+const MERGED_COL_RE = new RegExp(
+  '^(?:\\d+\\*\\d+\\*\\d+|\\d+\\s*[xX×]\\s*\\d+)?\\s*(\\d+)\\s*(' + MERGED_UNIT + '|\\*)\\s*(\\d+\\.\\d{1,2})\\s*(\\d+\\.\\d{1,2})?\\s*$'
+);
+// 行尾（名称里）扒取：用于锚点行名称被规格/数量/单价/优惠粘连的情形
+const MERGED_TAIL_RE = new RegExp(
+  '(?:\\d+\\*\\d+\\*\\d+|\\d+\\s*[xX×]\\s*\\d+)?\\s*(\\d+)\\s*(' + MERGED_UNIT + ')\\s*(\\d+\\.\\d{1,2})\\s*(\\d+\\.\\d{1,2})?\\s*$'
+);
+// 残留的纯规格片段（N*N*N / N*N），从名称里清掉，规格不是品名一部分
+const SPEC_RE = /\d+\s*[*xX×]\s*\d+(?:\s*[*xX×]\s*\d+)?/g;
+
+export interface MergedCol {
+  rest: string;
+  quantity?: number;
+  unit?: string;
+  price?: number;
+  discount?: number;
+}
+
+/** 从文本末尾扒出 `规格? 数量 单位 单价 优惠?`。命中返回清理后的名称与其他字段，否则原样返回。 */
+export function peelMergedColumn(text: string): MergedCol {
+  const m = text.match(MERGED_TAIL_RE);
+  if (m) {
+    return {
+      rest: text.slice(0, m.index).replace(/\s+$/, ''),
+      quantity: Number(m[1]),
+      unit: m[2] === '*' ? undefined : m[2],
+      price: Number(m[3]),
+      discount: m[4] ? Number(m[4]) : undefined,
+    };
+  }
+  return { rest: text };
+}
+
+/** 判断一行是否为独立的「数量 单位 单价 优惠」列块（整行匹配），用于从块里扒列值。 */
+export function matchMergedColumnLine(line: string): { quantity?: number; unit?: string; price?: number; discount?: number } | null {
+  const m = line.match(MERGED_COL_RE);
+  if (m) {
+    return {
+      quantity: Number(m[1]),
+      unit: m[2] === '*' ? undefined : m[2],
+      price: Number(m[3]),
+      discount: m[4] ? Number(m[4]) : undefined,
+    };
+  }
+  return null;
+}
+
 // 组合表头行（如「条码 商品名称 数量 单价 金额」）：整行都是列名，绝不能当商品名
 
 /**
@@ -899,9 +968,17 @@ function parseItems(lines: string[]): BillItem[] {
       continue;
     }
 
+    // 合并行：锚点行名称常被 `规格 数量 单位 单价 优惠` 粘连（如金达小票
+    // `5角小辣条…1*14*301中包10.000.10`）。先扒出列值并清理名称，再走竖排归并。
+    const decimals: { v: number; i: number }[] = [];
+    const peeled = peelMergedColumn(a.name);
+    a.name = peeled.rest;
     let qty: number | undefined;
     let unit: string | undefined;
-    const decimals: { v: number; i: number }[] = [];
+    if (peeled.quantity != null && qty === undefined) qty = peeled.quantity;
+    if (peeled.unit && unit == null) unit = peeled.unit;
+    if (peeled.price != null) decimals.push({ v: peeled.price, i: a.idx });
+    if (peeled.discount != null) decimals.push({ v: peeled.discount, i: a.idx });
     let gift = false;
     const nameFrags: string[] = [];
     const trailingNames: string[] = [];
@@ -915,9 +992,22 @@ function parseItems(lines: string[]): BillItem[] {
         closed = true;
         continue;
       }
+      // 合并行：独立的「规格? 数量 单位 单价 优惠」列块（如 `1*10*20 1中包15.00 0.13`）。
+      // 命中即扒出列值，不污染名称。
+      const colM = matchMergedColumnLine(line);
+      if (colM) {
+        if (qty === undefined && colM.quantity != null) {
+          qty = colM.quantity;
+          if (colM.unit) unit = colM.unit;
+        }
+        if (colM.price != null) decimals.push({ v: colM.price, i: a.idx + 1 + bi });
+        if (colM.discount != null) decimals.push({ v: colM.discount, i: a.idx + 1 + bi });
+        continue;
+      }
       // 数量+单位(精确 "N箱")
-      const um = line.match(UNIT_RE);
-      if (um && qty === undefined) {
+            const um = line.match(UNIT_RE);
+            // 排除「13 位条码粘连单位词」(如 "6949352205159箱")：条码不是数量
+            if (um && qty === undefined && um[1].length < 12) {
         qty = Number(um[1]);
         unit = um[2];
         continue;
@@ -948,7 +1038,7 @@ function parseItems(lines: string[]): BillItem[] {
         continue;
       }
       // 规格行 "1*12"
-      if (/^\d+\s*[.*xX×]\s*\d+$/.test(line)) continue;
+      if (/^\d+\s*[*xX×]\s*\d+$/.test(line)) continue;
       // 名称续行：上一锚点已闭合、且本行紧贴下一锚点 → 留给下一锚点
       if (isProductNameLine(line)) {
         if (closed && nextIdx - (a.idx + 1 + bi) <= 1) trailingNames.push(line);
@@ -988,6 +1078,8 @@ function parseItems(lines: string[]): BillItem[] {
       .filter((s) => s && s.trim())
       .join(' ')
       .trim();
+    // 清掉仍残留的纯规格片段（N*N*N / N*N），规格不是品名一部分
+    name = name.replace(SPEC_RE, ' ').replace(/\s{2,}/g, ' ').trim();
     name = normalizeOcrName(cleanName(name));
 
     // 校验：|数量×单价−优惠−金额| > 0.5 → 反推单价，仍不符则标 suspect
@@ -1204,24 +1296,460 @@ function parseItemsFallback(lines: string[]): BillItem[] {
   return items.slice(0, 50);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 各格式族抽取实现
+// ─────────────────────────────────────────────────────────────────────────
+function round2(n: number | undefined): number | undefined {
+  return n != null && Number.isFinite(n) ? Math.round(n * 100) / 100 : undefined;
+}
+
+function assembleBill(
+  lines: string[],
+  text: string,
+  items: BillItem[],
+  format: string,
+  warnings: string[]
+): PurchaseBill {
+  const orderNo = parseOrderNo(text, lines);
+  const date =
+    parseDate(lines.find((l) => /(日期|时间|下单|开单|送货|打印|报单|制单)/.test(l)) || '') || parseDate(text);
+  const arrivalDate = parseDate(lines.find((l) => /(送货|到货|交付)/.test(l)) || '');
+  const supplierName = parseSupplier(lines);
+  const itemTotal = items.reduce((s, it) => s + (it.amount || 0), 0);
+  // 票面「合计/总计」优先；无合计时兜底用明细求和。统一四舍五入到 2 位，避免浮点误差（如 252.75000000000003）。
+  const billTotal = parseTotal(lines);
+  const total = round2(billTotal != null ? billTotal : itemTotal > 0 ? itemTotal : undefined);
+  const itemsTotal = itemTotal > 0 ? round2(itemTotal) : undefined;
+  const paid = parseMoney(lines, /(打款|已付|实付|已付金额|付款金额|收款金额|现金|微信|支付宝)/);
+  const discount = parseMoney(lines, /(优惠|折扣|减免|让利)/);
+  const unpaid = parseMoney(lines, /(未付|欠付|余款|尚欠)/);
+  return { orderNo, date, arrivalDate, supplierName, total, itemsTotal, paid, discount, unpaid, items, raw: text, format, warnings };
+}
+
+// ── 针式连打销售单（销售单/销货单/出库单/访销单）────────────────────────────
+const COL_KEYWORDS =
+  /(序号|商品编码|商品名称|商品全名|名称|品牌|规格|条形码|条码|数量|单位|单价|金额|售价|订单金额|实际售价|实收金额|备注|小计|合计|页小计|本页小计)/;
+const BARE_SEQ_RE = /^\d{1,3}$/;
+const GLUED_SEQ_RE = /^\d{1,3}[\s一-龥A-Za-z(°]/;
+const NAME_EXCLUDE =
+  /(合计|总计|小计|金额|单价|数量|成交|应收|实收|规格|商品名称|商品编码|条形码|条码|单位|序号|备注|品牌|实际售价|订单金额|实收金额|建议零售价|客户|地址|电话|送货|业务员|制单|打印|开单|日期|单号|编号|折扣|原单|后单|生产日期|折扣后|项目|标签|包装数量|订单数量|页小计|本页小计|商品明细|出库)/;
+
+/**
+ * 「序号与条码无分隔粘连」的识别：OCR 常把行号直接粘在条码前，如
+ *   `10695653650024523g瑶红QQ脆皮-`  = 序号 10 + 条码 69565365002452 + 名称 3g瑶红QQ脆皮-
+ *   `11693556360027232g金厨娘香酥鸡爪` = 序号 11 + 条码 69355636002723 + …
+ * 仅当行首 1~2 位数字**恰好等于期望序号**时才认定（`expectedSeq` 为 null 时不认，保持保守），
+ * 否则纯条码行（如 `695653650024523g…`）会被误判成序号 69，把分组切碎。
+ */
+function gluedSeqLen(l: string, expectedSeq: number | null): number {
+  if (expectedSeq == null) return 0;
+  const m = l.trim().match(/^(\d{1,2})(\d{12,14})/);
+  if (!m) return 0;
+  return Number(m[1]) === expectedSeq ? m[1].length : 0;
+}
+
+/** 取一行表达的行号（用于推进「期望序号」）。取不到返回 null。 */
+function seqNumberOf(l: string): number | null {
+  const t = l.trim();
+  const g = t.match(/^(\d{1,2})(\d{12,14})/);
+  if (g) return Number(g[1]);
+  const b = t.match(/^(\d{1,3})(?:\s|$|[一-龥A-Za-z(°])/);
+  if (b) return Number(b[1]);
+  return null;
+}
+
+/** 判断一行是否像「序号」行：裸整数，或数字粘连品名/条码。排除「数量+单位」「规格」。 */
+function isSeqLine(l: string, nextLine: string, expectedSeq: number | null = null): boolean {
+  const t = l.trim();
+  if (gluedSeqLen(l, expectedSeq) > 0) return true; // 序号+条码无分隔粘连
+  if (!BARE_SEQ_RE.test(t) && !GLUED_SEQ_RE.test(t)) return false;
+  if (/^\d{1,3}\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)/.test(t)) return false; // 数量+单位（注意：单位是非 ASCII，不能用 \b）
+  if (/^\d+\s*[*xX×]/.test(t)) return false; // 规格
+  if (/^\d{1,3}\s*中包/.test(t)) return false;
+  // 裸整数须后接条码或品名（而非单位/数字）才认作序号；否则是数量单元格
+  if (BARE_SEQ_RE.test(t)) {
+    const nx = nextLine.trim();
+    // 序号后若紧跟纯单位词（箱/袋/瓶…），说明本行是「数量」单元格，绝不当序号，
+    // 否则会把数量误判为新组起点，截断分组、丢量丢价（如 fmt01 的 "3 袋"）。
+    if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)$/.test(nx)) return false;
+    return /^\d{8,}/.test(nx) || /^[一-龥]/.test(nx);
+  }
+  return true;
+}
+
+/** 把一个 item 分组（从序号行到下一序号行）分类成 BillItem。 */
+function classifyPinShiGroup(group: string[]): BillItem | null {
+  let barcode = '';
+  const nameParts: string[] = [];
+  let qty: number | undefined;
+  let unit: string | undefined;
+  const decimals: { v: number; i: number }[] = [];
+  let gift = false;
+
+  group.forEach((rawLine, gi) => {
+    let line = rawLine.trim();
+    if (!line) return;
+    if (BARE_SEQ_RE.test(line)) {
+      if (gi === 0) return; // 序号行
+      const nx = group[gi + 1] ? group[gi + 1].trim() : '';
+      // 仅当数量尚未定位、且后接纯单位词时，本行才是「数量」；否则视作价格/金额数值，继续往下走。
+      if (qty === undefined && /^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)$/.test(nx)) {
+        qty = Number(line);
+        return;
+      }
+    }
+    // 序号粘连品名（如 "1统一杯汤达人…" / "5°统一2块…"）：去掉前置序号与噪声符号
+    if (gi === 0 && GLUED_SEQ_RE.test(line) && !splitStuckBarcode(line)) {
+      line = line.replace(/^\d{1,3}\s*[°]?/, '').trim();
+      if (!line) return;
+    }
+    if (/赠品|赠送|搭赠| Free |FREE/.test(line)) {
+      gift = true;
+      return;
+    }
+    if (/^\d+\s*[*xX×]\s*\d+(\s*[*xX×]\s*\d+)?$/.test(line)) return; // 规格
+    const colM = matchMergedColumnLine(line); // 合并列块：规格? 数量 单位 单价 优惠
+    if (colM) {
+      if (qty === undefined && colM.quantity != null) {
+        qty = colM.quantity;
+        if (colM.unit) unit = colM.unit;
+      }
+      if (colM.price != null) decimals.push({ v: colM.price, i: gi });
+      if (colM.discount != null) decimals.push({ v: colM.discount, i: gi });
+      return;
+    }
+        const um = line.match(UNIT_RE); // 数量+单位
+        // 排除「13 位条码粘连单位词」(如 "6949352205159箱")：条码不是数量
+        if (um && um[1].length < 12) {
+            if (qty === undefined) {
+                qty = Number(um[1]);
+                unit = um[2];
+            }
+            return;
+        }
+    const uw = line.match(/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/); // 裸单位词
+    if (uw) {
+      if (!unit) unit = uw[1];
+      return;
+    }
+    const s = splitStuckBarcode(line); // 含条码 → 扒条码 + 名称（合并行）
+    if (s) {
+      barcode = s.barcode;
+      const peeled = peelMergedColumn(s.name);
+      if (peeled.quantity != null && qty === undefined) qty = peeled.quantity;
+      if (peeled.unit && !unit) unit = peeled.unit;
+      if (peeled.price != null) decimals.push({ v: peeled.price, i: gi });
+      if (peeled.discount != null) decimals.push({ v: peeled.discount, i: gi });
+      const nm = peeled.rest.trim();
+      const uw2 = nm.match(/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/);
+      if (uw2) {
+        if (!unit) unit = uw2[1];
+      } else if (nm && /[一-龥]/.test(nm)) nameParts.push(nm);
+      return;
+    }
+    const allDec = line.match(/\d+\.\d{1,2}/g); // 纯数字金额行
+    if (allDec && /^[¥￥$\s\d.,]+$/.test(line) && !/(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)/.test(line)) {
+      for (const d of allDec) decimals.push({ v: Number(d), i: gi });
+      return;
+    }
+    if (/[一-龥]{2,}/.test(line) && !NAME_EXCLUDE.test(line)) {
+      nameParts.push(line);
+      return;
+    }
+    // 纯整数金额/单价行（如 "15" / "22"）：OCR 常把 .00 省掉。仅当数量已定位后才纳入，
+    // 避免把数量行/序号重复计入，补全无小数的金额。
+    if (/^\d{1,6}$/.test(line) && qty !== undefined) {
+      const n = Number(line);
+      if (n > 0 && n < 100000) decimals.push({ v: n, i: gi });
+    }
+    if (allDec) for (const d of allDec) decimals.push({ v: Number(d), i: gi });
+  });
+
+  // 金额/单价/优惠
+  const discountCandidates = decimals.filter((d) => d.v > 0 && d.v < 1);
+  let discount: number | undefined;
+  if (discountCandidates.length) discount = discountCandidates.map((d) => d.v).sort((x, y) => x - y)[0];
+  const valueDecimals = decimals.filter((d) => !(discount != null && Math.abs(d.v - discount) < 1e-9));
+  let price: number | undefined;
+  let amount: number | undefined;
+  if (valueDecimals.length) {
+    valueDecimals.sort((x, y) => x.i - y.i);
+    price = valueDecimals[0].v;
+    amount = valueDecimals[valueDecimals.length - 1].v;
+    // 最后一个小数若明显偏离「单价×数量」（如建议零售价/原价列），改取与单价一致者
+    if (valueDecimals.length >= 2 && qty != null) {
+      const expected = (price as number) * qty;
+      const last = valueDecimals[valueDecimals.length - 1].v;
+      if (Math.abs(last - expected) > 0.5 * Math.max(1, expected)) {
+        const m = [...valueDecimals].reverse().find((d) => Math.abs(d.v - expected) < 0.5);
+        if (m) amount = m.v;
+      }
+    }
+    if (valueDecimals.length === 1) amount = price;
+    // 金额优先取「单价×数量 − 优惠」的候选：OCR 噪声数字（如孤立的 "08" 行）常被误当金额，
+    // 而针式单的金额列恰等于该式（例：单价10 × 1 − 优惠0.10 = 9.90）。
+    if (qty != null && price != null && valueDecimals.length >= 2) {
+      const expectNet = price * qty - (discount || 0);
+      const hitNet = valueDecimals.find((d) => Math.abs(d.v - expectNet) < 0.02);
+      if (hitNet) amount = hitNet.v;
+    }
+  }
+  if (gift || (amount === 0 && price === 0)) {
+    price = 0;
+    amount = 0;
+  }
+
+  let name = nameParts.join(' ').replace(SPEC_RE, ' ').replace(/\s{2,}/g, ' ').trim();
+  name = normalizeOcrName(cleanName(name));
+  if (!name) return null;
+  const item: BillItem = { name, barcode, unit, quantity: qty, price, amount };
+  if (discount != null && discount > 0) item.discount = discount;
+  if (qty == null || price == null) item.suspect = true;
+  return item;
+}
+
+function extractPinShiColumnar(lines: string[]): BillItem[] | null {
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length - 6; i++) {
+    const w = lines.slice(i, Math.min(i + 12, lines.length)).map((l) => l.trim());
+    if (w.filter((l) => COL_KEYWORDS.test(l)).length >= 4) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) return null;
+  const seqIdxs: number[] = [];
+  const gluedLens = new Map<number, number>(); // 行号 → 需剥掉的粘连序号长度
+  // 「期望序号」锚点：用于识别「序号+条码无分隔粘连」的行（如 `10695653650024523g…`）
+  let expectedSeq: number | null = null;
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const glued = gluedSeqLen(lines[i], expectedSeq);
+    if (glued > 0 || isSeqLine(lines[i], lines[i + 1] || '', expectedSeq)) {
+      if (glued > 0) gluedLens.set(i, glued);
+      seqIdxs.push(i);
+      const n = seqNumberOf(lines[i]);
+      if (n != null) expectedSeq = n + 1;
+    }
+  }
+  // 允许「仅 1 个序号」的单品小票（如鸣凰亚昌单条销售单）：整段到文末归为一组。
+  if (seqIdxs.length < 1) return null;
+  const items: BillItem[] = [];
+  for (let k = 0; k < seqIdxs.length; k++) {
+    const start = seqIdxs[k];
+    const end = k + 1 < seqIdxs.length ? seqIdxs[k + 1] : lines.length;
+    const group = lines.slice(start, end).map((l) => l.trim()).filter(Boolean);
+    if (group.length === 0) continue;
+    // 组首行是「序号+条码粘连」时，先剥掉粘连的序号，避免混入名称
+    const gl = gluedLens.get(start) || 0;
+    if (gl > 0) group[0] = group[0].slice(gl);
+    const it = classifyPinShiGroup(group);
+    if (it) items.push(it);
+  }
+  return items.length > 0 ? items : null;
+}
+
+function extractPinShi(lines: string[], text: string): PurchaseBill | null {
+  let items = extractPinShiColumnar(lines);
+  if (!items || items.length === 0) items = parseItems(lines); // 兜底到锚点式（金达/鸣凰等）
+  if (!items || items.length === 0) return null;
+  const warnings: string[] = [];
+  if (/(第\d+\s*\/\s*\d+\s*页|共\d+页)/.test(text) && !/第1\/1页|当前第1页/.test(text)) {
+    warnings.push('单据为多页/分页，当前仅解析到本页内容，跨页合计可能不全，请人工核对');
+  }
+  return assembleBill(lines, text, items, 'pinshi', warnings);
+}
+
+// ── 京东万商购物清单 ────────────────────────────────────────────────────────
+function extractJdWanshang(lines: string[], text: string): PurchaseBill | null {
+  if (!lines.some((l) => /京东万商购物清单/.test(l))) return null;
+  // 锚点：每行行首（去逗号后）为 12~14 位纯数字的行，才是商品条码。
+  // 订单号/运单号（如 "订单号:ESL00000025535540188" / "JDVA46590679507"）不以数字开头，
+  // 不会误锚；订单号里夹的 13 位数字子串也因不在行首而被排除。
+  const anchors: { idx: number; barcode: string }[] = [];
+  lines.forEach((l, i) => {
+    const cleaned = l.replace(/,/g, '').trim();
+    const m = cleaned.match(/^(\d{12,14})/);
+    if (m) anchors.push({ idx: i, barcode: m[1] });
+  });
+  if (anchors.length === 0) return null;
+  const items: BillItem[] = [];
+  for (let k = 0; k < anchors.length; k++) {
+    const a = anchors[k];
+    const nextIdx = k + 1 < anchors.length ? anchors[k + 1].idx : lines.length;
+    const block = lines.slice(a.idx + 1, nextIdx).map((l) => l.trim());
+    const nameParts: string[] = [];
+    // 条码行本身可能粘连品名（如 fmt02 "6904588680170 李字檀香型蚊香单盒装"）
+    const anchorName = stripBarcodeFromName(lines[a.idx].replace(/,/g, ''), a.barcode).trim();
+    if (/[一-龥]{2,}/.test(anchorName)) nameParts.push(anchorName);
+    const decimalsBeforeQty: number[] = [];
+    const decimalsAfterQty: number[] = [];
+    let qty: number | undefined;
+    let qtySeen = false;
+    for (const bl of block) {
+      if (/^(折扣|商品条码|商品名称|原单|后单|生产日期|后总|价|数量|序号|名称|折扣后)/.test(bl)) continue;
+      if (/^\d{4}[-/年]\d/.test(bl)) continue; // 生产日期/打印日期
+      const allDec = bl.match(/\d+\.\d{1,2}/g);
+      if (allDec && /^[¥￥$\s\d.,]+$/.test(bl) && !/(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)/.test(bl)) {
+        for (const d of allDec) {
+          if (!qtySeen) decimalsBeforeQty.push(Number(d));
+          else decimalsAfterQty.push(Number(d));
+        }
+        continue;
+      }
+      // 数量：条码后的裸整数行（京东万商「数量」列单独成行）
+      if (/^\d{1,4}$/.test(bl) && qty === undefined) {
+        qty = Number(bl);
+        qtySeen = true;
+        continue;
+      }
+      if (/[一-龥]{2,}/.test(bl) && !/(合计|总计|小计|金额|单价|数量|成交|应收|实收|建议零售价|备注)/.test(bl)) {
+        nameParts.push(bl);
+      }
+    }
+    let name = nameParts.join('').replace(/\s+/g, ' ').trim();
+    name = normalizeOcrName(cleanName(stripBarcodeFromName(name, a.barcode)));
+    if (!name) continue;
+    // 单价取「数量」列之前的最后一个价（折扣后单价）；金额取「数量」列之后的第一个价（总价）。
+    const price =
+      decimalsBeforeQty.length > 0 ? decimalsBeforeQty[decimalsBeforeQty.length - 1] : undefined;
+    const amount =
+      decimalsAfterQty.length > 0
+        ? decimalsAfterQty[0]
+        : decimalsBeforeQty.length > 0
+          ? decimalsBeforeQty[decimalsBeforeQty.length - 1]
+          : undefined;
+    items.push({ name, barcode: a.barcode, quantity: qty, price, amount });
+  }
+  if (items.length === 0) return null;
+  return assembleBill(lines, text, items, 'jd-wanshang', []);
+}
+
+// ── 易久批订单 ──────────────────────────────────────────────────────────────
+function extractYijiupi(lines: string[], text: string): PurchaseBill | null {
+  if (!lines.some((l) => /易久批订单|易久批/.test(l))) return null;
+  let total: number | undefined;
+  for (const l of lines) {
+    const m = l.match(/应收金额[:：]?\s*(\d+\.?\d*)/);
+    if (m) {
+      total = Number(m[1]);
+      break;
+    }
+  }
+  const barAnchors: number[] = [];
+  lines.forEach((l, i) => {
+    if (/\d{13}/.test(l)) barAnchors.push(i);
+  });
+  const items: BillItem[] = [];
+  for (const idx of barAnchors) {
+    const block = lines.slice(Math.max(0, idx - 3), idx + 4).map((l) => l.trim());
+    const barcode = (lines[idx].match(/\d{13}/) || [])[0] || '';
+    const name = block.find((b) => /[一-龥]{2,}/.test(b) && !/\[\d|原价|商品金额|订单应收|备注|单价|数量|规格|单位|金额|商品名称|序号|条码|小计|合计|页/.test(b)) || '';
+    const qtyM = block.find((b) => /(\d+)\s*件/.test(b));
+    const qty = qtyM ? Number((qtyM.match(/(\d+)\s*件/) || [])[1]) : undefined;
+    const priceM = block.find((b) => /\/\s*件/.test(b) && /\d+\.?\d*/.test(b));
+    const price = priceM ? Number((priceM.match(/(\d+\.?\d*)\s*\/\s*件/) || [])[1]) : undefined;
+    // 跳过表头行（单价/数量/箱号/规格…）被误当成品名的情况：这些行虽含中文但非商品
+    if (!name || /^(单价|数量|规格|单位|金额|小计|合计|序号|商品名称|条码|箱号|箱规|货号|编码|件数|箱数|页|备注|原价|应收|实收|折|计划|实际)/.test(name)) continue;
+    const amount = price != null && qty != null ? round2(price * qty) : price != null ? price : undefined;
+    items.push({ name: normalizeOcrName(cleanName(name)), barcode, quantity: qty, price, amount });
+  }
+  if (items.length === 0 && total == null) return null;
+  const bill = assembleBill(lines, text, items, 'yijiupi', []);
+  if (total != null) bill.total = round2(total);
+  return bill;
+}
+
+// ── 励贞配送单 ──────────────────────────────────────────────────────────────
+function extractLizhen(lines: string[], text: string): PurchaseBill | null {
+  if (
+    !lines.some(
+      (l) => /配送单编号|出库金额|励点贸易|超市全品类进货商城|鲜世纪/.test(l)
+    )
+  )
+    return null;
+  let total: number | undefined;
+  for (const l of lines) {
+    const m = l.match(/(小计|合计)[:：]?\s*(\d+\.?\d*)/);
+    if (m) {
+      total = Number(m[2]);
+      break;
+    }
+  }
+  if (total == null) {
+    for (const l of lines) {
+      const m = l.match(/应收[:：]?\s*(\d+\.?\d*)/);
+      if (m) {
+        total = Number(m[1]);
+        break;
+      }
+    }
+  }
+  const barAnchors: number[] = [];
+  lines.forEach((l, i) => {
+    if (/\[\d{12,13}\]/.test(l)) barAnchors.push(i);
+  });
+  const items: BillItem[] = [];
+  for (const idx of barAnchors) {
+    const block = lines.slice(Math.max(0, idx - 8), idx + 2).map((l) => l.trim());
+    const barcode = (lines[idx].match(/\[(\d{12,13})\]/) || [])[1] || '';
+    const name = block.find(
+      (b) =>
+        /[一-龥]{2,}/.test(b) &&
+        !/\[/.test(b) &&
+        !/(原价|小计|合计|应付|优惠|未出库|出库|商品信息|出库数量|出库单价|订单数量|商品明细)/.test(b)
+    ) || '';
+    const decs = block.filter((b) => /^\d+\.\d{2}$/.test(b)).map((b) => Number(b));
+    const price = decs.length ? decs[0] : undefined;
+    const amount = decs.length >= 2 ? decs[decs.length - 1] : price;
+    const qtyM = block.filter((b) => /^\d+$/.test(b));
+    const qty = qtyM.length ? Number(qtyM[qtyM.length - 1]) : undefined;
+    if (!name) continue;
+    items.push({ name: normalizeOcrName(cleanName(name)), barcode, quantity: qty, price, amount });
+  }
+  if (items.length === 0 && total == null) return null;
+  const bill = assembleBill(lines, text, items, 'lizhen', []);
+  if (total != null) bill.total = round2(total);
+  return bill;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 格式注册表（顺序：特异性高的家族在前；全部未命中走通用兜底）
+// ─────────────────────────────────────────────────────────────────────────
+interface FormatHandler {
+  format: string;
+  detect: (lines: string[]) => boolean;
+  extract: (lines: string[], text: string) => PurchaseBill | null;
+}
+
+const FORMAT_REGISTRY: FormatHandler[] = [
+  { format: 'jd-wanshang', detect: (l) => l.some((x) => /京东万商购物清单/.test(x)), extract: extractJdWanshang },
+  { format: 'yijiupi', detect: (l) => l.some((x) => /易久批订单|易久批/.test(x)), extract: extractYijiupi },
+  {
+    format: 'lizhen',
+    detect: (l) => l.some((x) => /配送单编号|出库金额|励点贸易|超市全品类进货商城|鲜世纪/.test(x)),
+    extract: extractLizhen,
+  },
+  {
+    format: 'pinshi',
+    detect: (l) => l.some((x) => /(销售单|销货单|出库单|访销单)/.test(x)),
+    extract: extractPinShi,
+  },
+];
+
 export function parsePurchaseBill(raw: string): PurchaseBill {
   const text = (raw || '').trim();
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
-  const orderNo = parseOrderNo(text, lines);
-  const date = parseDate(lines.find((l) => /(日期|时间|下单|开单|送货|打印|报单|制单)/.test(l)) || '') || parseDate(text);
-  const arrivalDate = parseDate(lines.find((l) => /(送货|到货|交付)/.test(l)) || '');
-  const supplierName = parseSupplier(lines);
-  const items = parseItems(lines);
-  const itemTotal = items.reduce((s, it) => s + (it.amount || 0), 0);
-  // 票面「合计/总计」优先：它是凭证上的真相。明细求和只在票面无合计时兜底。
-  // 两者同时存在且不一致时，说明拍照有漏行/漏列，itemsTotal 交给前端做核对提示。
-  const billTotal = parseTotal(lines);
-  const total = billTotal != null ? billTotal : itemTotal > 0 ? itemTotal : undefined;
-  const itemsTotal = itemTotal > 0 ? Number(itemTotal.toFixed(2)) : undefined;
-  const paid = parseMoney(lines, /(打款|已付|实付|已付金额|付款金额|收款金额|现金|微信|支付宝)/);
-  const discount = parseMoney(lines, /(优惠|折扣|减免|让利)/);
-  const unpaid = parseMoney(lines, /(未付|欠付|余款|尚欠)/);
+  for (const h of FORMAT_REGISTRY) {
+    if (h.detect(lines)) {
+      const bill = h.extract(lines, text);
+      if (bill && bill.items.length > 0) return bill;
+    }
+  }
 
-  return { orderNo, date, arrivalDate, supplierName, total, itemsTotal, paid, discount, unpaid, items, raw: text };
+  // 通用兜底：现有锚点/列式逻辑。未识别版式明确提示用户人工核对。
+  const items = parseItems(lines);
+  const warnings = ['未识别的单据版式，已按通用规则解析，请人工核对'];
+  const bill = assembleBill(lines, text, items, 'generic', items.length > 0 ? warnings : warnings);
+  return bill;
 }
