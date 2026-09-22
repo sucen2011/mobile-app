@@ -68,11 +68,11 @@ describe('进货单解析器 · 真实样本回归', () => {
 
   // ── 以下为 12 张样本的结构性锁定（防回退）；真值待逐张人工核对后收紧 ──
   const cases: Array<{ file: string; format: string; items: number; total: number | null; note: string }> = [
-    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 12, total: 0.8, note: '常州翀通(销售单) 第1/5页' },
+    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 13, total: 0.8, note: '常州翀通(销售单) 第1/5页（总额待修）' },
     { file: 'fmt02.ocr.txt', format: 'jd-wanshang', items: 1, total: null, note: '京东万商 单品' },
     { file: 'fmt03.ocr.txt', format: 'pinshi', items: 7, total: 329, note: '常州好亦来(访销单)' },
     { file: 'fmt04.ocr.txt', format: 'pinshi', items: 8, total: 166.5, note: '常州礼雯(出库单)' },
-    { file: 'fmt05.ocr.txt', format: 'pinshi', items: 9, total: 344.35, note: '金达(09-14 单，OCR 丢序号/条码)' },
+    { file: 'fmt05.ocr.txt', format: 'pinshi', items: 15, total: 1103.24, note: '金达(09-14 单，条码锚点修复后 9→15)' },
     { file: 'fmt06.ocr.txt', format: 'pinshi', items: 3, total: 805, note: '常州天齐(销售单)' },
     { file: 'fmt07.ocr.txt', format: 'yijiupi', items: 7, total: 1205.87, note: '易久批订单（伪条目已剔除 9→7；价/额 NaN 待修）' },
     { file: 'fmt08.ocr.txt', format: 'lizhen', items: 4, total: 600, note: '励贞配送单 第1页' },
@@ -89,6 +89,10 @@ describe('进货单解析器 · 真实样本回归', () => {
       expect(bill.format).toBe(c.format);
       expect(bill.items).toHaveLength(c.items);
       if (c.total != null) expect(bill.total).toBeCloseTo(c.total, 2);
+      for (const it of bill.items) {
+        if (it.price != null) expect(Number.isNaN(it.price)).toBe(false);
+        if (it.amount != null) expect(Number.isNaN(it.amount)).toBe(false);
+      }
       // 品名不得残留「针式单量价碎片」；注意 `450ml*12瓶` / `500ml*15瓶` 是真实品名的一部分，不算碎片
       for (const it of bill.items) {
         const nm = String(it.name);
@@ -109,7 +113,7 @@ describe('进货单解析器 · 真实样本回归', () => {
     if (!has('fmt04.ocr.txt')) return;
     const bill = parsePurchaseBill(read('fmt04.ocr.txt'));
     const first = String(bill.items[0]?.name || '');
-    expect(first).not.toMatch(/地址|号|累计欠款/);
+    expect(first).not.toMatch(/地址|号|累计欠款|贝贝/);
   });
 
   it('多页单据拼接（励贞 fmt08+fmt09）→ 一份完整清单 8 条 / 总额 732.94 [原图核对]', () => {

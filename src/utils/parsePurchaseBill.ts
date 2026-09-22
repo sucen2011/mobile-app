@@ -1334,6 +1334,10 @@ const GLUED_SEQ_RE = /^\d{1,3}[\s一-龥A-Za-z(°]/;
 const NAME_EXCLUDE =
   /(合计|总计|小计|金额|单价|数量|成交|应收|实收|规格|商品名称|商品编码|条形码|条码|单位|序号|备注|品牌|实际售价|订单金额|实收金额|建议零售价|客户|地址|电话|送货|业务员|制单|打印|开单|日期|单号|编号|折扣|原单|后单|生产日期|折扣后|项目|标签|包装数量|订单数量|页小计|本页小计|商品明细|出库)/;
 
+// 地址/页脚噪声行：含「路/号/欠款/累计/新村/栋/室/广场/大厦/市场/签收」等特征且无条码无价格，
+// 是送货地址、欠款说明等，不是商品品名。品名误吞这类行会导致首条明细变成地址行（如 fmt04）。
+const ADDRESS_NOISE = /(路|号|欠款|累计|新村|栋|室|广场|大厦|市场|中学|小学|超市|签收|送货地址|合计金额)/;
+
 /**
  * 「序号与条码无分隔粘连」的识别：OCR 常把行号直接粘在条码前，如
  *   `10695653650024523g瑶红QQ脆皮-`  = 序号 10 + 条码 69565365002452 + 名称 3g瑶红QQ脆皮-
@@ -1372,8 +1376,24 @@ function isSeqLine(l: string, nextLine: string, expectedSeq: number | null = nul
     // 序号后若紧跟纯单位词（箱/袋/瓶…），说明本行是「数量」单元格，绝不当序号，
     // 否则会把数量误判为新组起点，截断分组、丢量丢价（如 fmt01 的 "3 袋"）。
     if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)$/.test(nx)) return false;
+    // 后接「纯 12~13 位条码」：凡「无序号链可依」（本单第一行）或「恰为期望序号」时，
+    // 仍按序号行处理（如鸣凰单 `1` + `6932006225702`：1 是序号、条码是下一列）；
+    // 只有已建立序号链且数字与之不符时，才视作「数量单元格 + 商品条码列」，避免截断上一商品分组。
+    if (/^\d{12,13}$/.test(nx)) return expectedSeq == null || Number(t) === expectedSeq;
     return /^\d{8,}/.test(nx) || /^[一-龥]/.test(nx);
   }
+  return true;
+}
+
+/**
+ * 第二锚：判断一行是否为「条码商品行」——含 13 位 EAN 条码且整行是商品行（含中文品名），
+ * 且不是单据头/单据号/电话/地址等噪声行。用于在序号锚点漏检时（序号与条码粘连成长数字串）
+ * 仍能定位商品行起点。纯条码行（如独立成行的 "6901010117440"）不含中文，不是商品行，返回 false。
+ */
+function isBarcodeRow(line: string): boolean {
+  if (!/\d{13}/.test(line)) return false;
+  if (!/[一-龥]/.test(line)) return false;
+  if (/(单据编号|订单号|单号|编号|电话|地址|客户|业务员|打印|开单|录单|备注|运单|派车)/.test(line)) return false;
   return true;
 }
 
@@ -1398,9 +1418,11 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
         return;
       }
     }
-    // 序号粘连品名（如 "1统一杯汤达人…" / "5°统一2块…"）：去掉前置序号与噪声符号
+    // 序号粘连品名（如 "1统一杯汤达人…" / "5°统一2块…"）：去掉前置序号与噪声符号。
+    // 仅当数字后紧跟中文品名时才剥离（如 "1统一…"），避免把「音量/规格记号」误当序号前缀剥掉，
+    // 否则 "560ml健力宝" / "1L康师傅" / "500ml农夫…" 会被切成 "ml…"/"L…"，品名残缺。
     if (gi === 0 && GLUED_SEQ_RE.test(line) && !splitStuckBarcode(line)) {
-      line = line.replace(/^\d{1,3}\s*[°]?/, '').trim();
+      line = line.replace(/^\d{1,3}\s*[°]?(?=[一-龥])/, '').trim();
       if (!line) return;
     }
     if (/赠品|赠送|搭赠| Free |FREE/.test(line)) {
@@ -1453,6 +1475,8 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
       return;
     }
     if (/[一-龥]{2,}/.test(line) && !NAME_EXCLUDE.test(line)) {
+      // 地址/页脚噪声行（路/号/欠款/累计…）不当品名：避免首条明细变成地址行（fmt04）
+      if (ADDRESS_NOISE.test(line) && !extractBarcode(line)) return;
       nameParts.push(line);
       return;
     }
@@ -1522,11 +1546,21 @@ function extractPinShiColumnar(lines: string[]): BillItem[] | null {
   const gluedLens = new Map<number, number>(); // 行号 → 需剥掉的粘连序号长度
   // 「期望序号」锚点：用于识别「序号+条码无分隔粘连」的行（如 `10695653650024523g…`）
   let expectedSeq: number | null = null;
+  // 第二锚：条码行（含 13 位 EAN、且为商品行）作为组起点，补回「序号+条码无分隔粘连」导致
+  // GLUED_SEQ_RE 失效、整段被并成一条的行（如金达单里 `106921168597727500ml…` 这类长数字串）。
+  // 但若该条码行距上一个锚点 ≤3 行，说明它是同一商品行（序号所属商品的条码列），不再重复起组，
+  // 以免把已正确分组的一行切碎（如京东万商/其他单据里「序号行 + 条码行」相邻的情况）。
+  let lastAnchor = -99;
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const glued = gluedSeqLen(lines[i], expectedSeq);
-    if (glued > 0 || isSeqLine(lines[i], lines[i + 1] || '', expectedSeq)) {
+    let isAnchor = glued > 0 || isSeqLine(lines[i], lines[i + 1] || '', expectedSeq);
+    if (!isAnchor && isBarcodeRow(lines[i]) && i - lastAnchor > 3) {
+      isAnchor = true;
+    }
+    if (isAnchor) {
       if (glued > 0) gluedLens.set(i, glued);
       seqIdxs.push(i);
+      lastAnchor = i;
       const n = seqNumberOf(lines[i]);
       if (n != null) expectedSeq = n + 1;
     }
@@ -1645,13 +1679,20 @@ function extractYijiupi(lines: string[], text: string): PurchaseBill | null {
     const barcode = (lines[idx].match(/\d{13}/) || [])[0] || '';
     const name = block.find((b) => /[一-龥]{2,}/.test(b) && !/\[\d|原价|商品金额|订单应收|备注|单价|数量|规格|单位|金额|商品名称|序号|条码|小计|合计|页/.test(b)) || '';
     const qtyM = block.find((b) => /(\d+)\s*件/.test(b));
-    const qty = qtyM ? Number((qtyM.match(/(\d+)\s*件/) || [])[1]) : undefined;
+    const qty = qtyM ? toNum((qtyM.match(/(\d+)\s*件/) || [])[1]) : undefined;
     const priceM = block.find((b) => /\/\s*件/.test(b) && /\d+\.?\d*/.test(b));
-    const price = priceM ? Number((priceM.match(/(\d+\.?\d*)\s*\/\s*件/) || [])[1]) : undefined;
+    // 数值兜底：解析不出数字给 undefined（绝不给 NaN）；`NaN` 一律不得出现在输出里
+    const price = priceM ? toNum((priceM.match(/(\d+\.?\d*)\s*\/\s*件/) || [])[1]) : undefined;
     // 跳过表头行（单价/数量/箱号/规格…）被误当成品名的情况：这些行虽含中文但非商品
     if (!name || /^(单价|数量|规格|单位|金额|小计|合计|序号|商品名称|条码|箱号|箱规|货号|编码|件数|箱数|页|备注|原价|应收|实收|折|计划|实际)/.test(name)) continue;
     const amount = price != null && qty != null ? round2(price * qty) : price != null ? price : undefined;
-    items.push({ name: normalizeOcrName(cleanName(name)), barcode, quantity: qty, price, amount });
+    items.push({
+      name: normalizeOcrName(cleanName(name)),
+      barcode,
+      quantity: qty,
+      price: price != null && Number.isFinite(price) ? price : undefined,
+      amount: amount != null && Number.isFinite(amount) ? amount : undefined,
+    });
   }
   if (items.length === 0 && total == null) return null;
   const bill = assembleBill(lines, text, items, 'yijiupi', []);
