@@ -68,13 +68,13 @@ describe('进货单解析器 · 真实样本回归', () => {
 
   // ── 以下为 12 张样本的结构性锁定（防回退）；真值待逐张人工核对后收紧 ──
   const cases: Array<{ file: string; format: string; items: number; total: number | null; note: string }> = [
-    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 13, total: 0.8, note: '常州翀通(销售单) 第1/5页（总额待修）' },
+    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 13, total: 196, note: '常州翀通(销售单) 第1/5页（总额取明细合计）' },
     { file: 'fmt02.ocr.txt', format: 'jd-wanshang', items: 1, total: null, note: '京东万商 单品' },
     { file: 'fmt03.ocr.txt', format: 'pinshi', items: 7, total: 329, note: '常州好亦来(访销单)' },
     { file: 'fmt04.ocr.txt', format: 'pinshi', items: 8, total: 166.5, note: '常州礼雯(出库单)' },
     { file: 'fmt05.ocr.txt', format: 'pinshi', items: 15, total: 1103.24, note: '金达(09-14 单，条码锚点修复后 9→15)' },
     { file: 'fmt06.ocr.txt', format: 'pinshi', items: 3, total: 805, note: '常州天齐(销售单)' },
-    { file: 'fmt07.ocr.txt', format: 'yijiupi', items: 7, total: 1205.87, note: '易久批订单（伪条目已剔除 9→7；价/额 NaN 待修）' },
+    { file: 'fmt07.ocr.txt', format: 'yijiupi', items: 9, total: 1205.87, note: '易久批订单（列交织 → 单遍状态机，价/额齐全）' },
     { file: 'fmt08.ocr.txt', format: 'lizhen', items: 4, total: 600, note: '励贞配送单 第1页' },
     { file: 'fmt09.ocr.txt', format: 'lizhen', items: 4, total: 732.94, note: '励贞配送单 第2页' },
     { file: 'fmt10.ocr.txt', format: 'pinshi', items: 1, total: 48, note: '鸣凰亚昌（另一份 OCR）' },
@@ -121,5 +121,33 @@ describe('进货单解析器 · 真实样本回归', () => {
     expect(bill.format).toBe('lizhen');
     expect(bill.items).toHaveLength(8);
     expect(bill.total).toBeCloseTo(732.94, 2);
+  });
+  it('易久批：单遍状态机后每条都有量/价/额，且明细合计=票面应收 [原图核对]', () => {
+    const bill = parsePurchaseBill(read('fmt07.ocr.txt'));
+    expect(bill.format).toBe('yijiupi');
+    expect(bill.items.length).toBeGreaterThanOrEqual(9);
+    for (const it of bill.items) {
+      expect(it.quantity == null ? null : Number.isFinite(it.quantity)).not.toBe(false);
+      expect(Number.isNaN(Number(it.price))).toBe(false);
+    }
+    const withPrice = bill.items.filter((x) => typeof x.price === 'number' && x.price > 0);
+    expect(withPrice.length).toBe(bill.items.length);
+    const sum = bill.items.reduce((acc, x) => acc + (Number(x.amount) || 0), 0);
+    expect(sum).toBeCloseTo(1205.87, 2);          // 与单据「应收金额:1205.87元」一致
+    expect(bill.total).toBeCloseTo(1205.87, 2);
+  });
+
+  it('常州翀通(分页单)：票面合计明显小于明细时以明细为准并告警 [原图核对]', () => {
+    const bill = parsePurchaseBill(read('fmt01.ocr.txt'));
+    const sum = bill.items.reduce((acc, x) => acc + (Number(x.amount) || 0), 0);
+    expect(bill.total).toBeCloseTo(sum, 2);
+    expect((bill.warnings || []).join('')).toMatch(/明细合计|分页/);
+  });
+
+  it('京东万商品名不含页脚广告词（加盟/总件数/支付方式…）', () => {
+    const bill = parsePurchaseBill(read('fmt02.ocr.txt'));
+    expect(bill.items.length).toBeGreaterThan(0);
+    const nm = String(bill.items[0].name);
+    expect(nm).not.toMatch(/加盟|总件数|包裹数|支付方式|客服|扫码|无忧|签约/);
   });
 });

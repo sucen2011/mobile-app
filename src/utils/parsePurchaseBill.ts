@@ -1318,7 +1318,16 @@ function assembleBill(
   const itemTotal = items.reduce((s, it) => s + (it.amount || 0), 0);
   // 票面「合计/总计」优先；无合计时兜底用明细求和。统一四舍五入到 2 位，避免浮点误差（如 252.75000000000003）。
   const billTotal = parseTotal(lines);
-  const total = round2(billTotal != null ? billTotal : itemTotal > 0 ? itemTotal : undefined);
+  // 合理性守卫：票面合计**远小于**明细合计时（分页单只读到「页小计」的部分数字、或抓到无关小数），
+  // 以明细求和为准并告警——否则会给出一个看起来合理却错得离谱的总额（如 fmt01 得到 0.8）。
+  let totalRaw = billTotal;
+  if (billTotal != null && itemTotal > 0 && billTotal < itemTotal * 0.5) {
+    totalRaw = itemTotal;
+    warnings.push(
+      `票面合计 ${round2(billTotal)} 明显小于明细合计 ${round2(itemTotal)}（疑似分页/误读），已按明细合计显示，请人工核对`
+    );
+  }
+  const total = round2(totalRaw != null ? totalRaw : itemTotal > 0 ? itemTotal : undefined);
   const itemsTotal = itemTotal > 0 ? round2(itemTotal) : undefined;
   const paid = parseMoney(lines, /(打款|已付|实付|已付金额|付款金额|收款金额|现金|微信|支付宝)/);
   const discount = parseMoney(lines, /(优惠|折扣|减免|让利)/);
@@ -1636,6 +1645,8 @@ function extractJdWanshang(lines: string[], text: string): PurchaseBill | null {
         qtySeen = true;
         continue;
       }
+      // 页脚广告/提示词：出现即**停止**收集品名（否则会把页脚并进品名，如 fmt02）
+      if (/(加盟|总件数|总金额|包裹数|支付方式|客服|扫码|了解|签约|无忧|返利|关注|公众号|下载|客户签|本公司|温馨提示)/.test(bl)) break;
       if (/[一-龥]{2,}/.test(bl) && !/(合计|总计|小计|金额|单价|数量|成交|应收|实收|建议零售价|备注)/.test(bl)) {
         nameParts.push(bl);
       }
@@ -1669,32 +1680,69 @@ function extractYijiupi(lines: string[], text: string): PurchaseBill | null {
       break;
     }
   }
-  const barAnchors: number[] = [];
-  lines.forEach((l, i) => {
-    if (/\d{13}/.test(l)) barAnchors.push(i);
-  });
+  // 该版式 OCR 会把「条码 / 品名 / 序号 / 规格 / 单价 / 数量」按列**打乱交织**（不是逐行一商品）：
+  //   22 6901672650835 | 23 乐堡小麦精酿啤酒9度1L(1*6) | 24 02 | 25 6罐/件 | 26 <下一条码> …
+  //   27 55/件 | 28 1件 | 29 青岛啤酒… | 30 12听/件 | 31 03 | 32 <下一条码> | 33 28.80/件 | 34 5件 …
+  // ⇒ 逐条固定窗口取不到（单价离条码 5~8 行），改为**单遍状态机**：顺序消费各行，
+  //    把遇到的条码/品名/单价/数量挂到"当前商品"上。
   const items: BillItem[] = [];
-  for (const idx of barAnchors) {
-    const block = lines.slice(Math.max(0, idx - 3), idx + 4).map((l) => l.trim());
-    const barcode = (lines[idx].match(/\d{13}/) || [])[0] || '';
-    const name = block.find((b) => /[一-龥]{2,}/.test(b) && !/\[\d|原价|商品金额|订单应收|备注|单价|数量|规格|单位|金额|商品名称|序号|条码|小计|合计|页/.test(b)) || '';
-    const qtyM = block.find((b) => /(\d+)\s*件/.test(b));
-    const qty = qtyM ? toNum((qtyM.match(/(\d+)\s*件/) || [])[1]) : undefined;
-    const priceM = block.find((b) => /\/\s*件/.test(b) && /\d+\.?\d*/.test(b));
-    // 数值兜底：解析不出数字给 undefined（绝不给 NaN）；`NaN` 一律不得出现在输出里
-    const price = priceM ? toNum((priceM.match(/(\d+\.?\d*)\s*\/\s*件/) || [])[1]) : undefined;
-    // 跳过表头行（单价/数量/箱号/规格…）被误当成品名的情况：这些行虽含中文但非商品
-    if (!name || /^(单价|数量|规格|单位|金额|小计|合计|序号|商品名称|条码|箱号|箱规|货号|编码|件数|箱数|页|备注|原价|应收|实收|折|计划|实际)/.test(name)) continue;
-    const amount = price != null && qty != null ? round2(price * qty) : price != null ? price : undefined;
-    items.push({
-      name: normalizeOcrName(cleanName(name)),
-      barcode,
-      quantity: qty,
-      price: price != null && Number.isFinite(price) ? price : undefined,
-      amount: amount != null && Number.isFinite(amount) ? amount : undefined,
-    });
+  let cur: BillItem | null = null;
+  // 列交织导致「下一商品条码」常出现在「上一商品的单价/数量」之前（如 26 条码₂ → 27 单价₁ → 28 数量₁），
+  // 因此价格/数量不挂"当前商品"，而挂到**最近一个已有品名、且该字段仍为空**的商品上。
+  const targetFor = (field: 'price' | 'quantity'): BillItem | null => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      if (items[k].name && items[k][field] == null) return items[k];
+    }
+    return null;
+  };
+  // 表头/非商品行：含这些词的行不得当品名或名称续行
+  const STOP =
+    /(单价|数量|规格|单位|金额|小计|合计|序号|商品名称|商品条形码|条码|箱号|箱规|货号|编码|件数|箱数|原价|应收|实收|支付方式|出库位|用户名|名称[:：]|地址[:：]|收货人|打印|订单|备注|计划|实际|总件数|体积|在线支付|优惠)/;
+  for (const raw of lines) {
+    const l = raw.trim();
+    if (!l) continue;
+    const bc = (l.match(/\d{13}/) || [])[0];
+    if (bc) {
+      cur = { name: '', barcode: bc };
+      items.push(cur);
+      const rest = l.replace(bc, ' ').trim();
+      if (/[一-龥]{2,}/.test(rest) && !STOP.test(rest)) cur.name = rest;
+      continue;
+    }
+    if (!cur) continue;
+    // 单价：`55/件`（`6罐/件`、`12听/件` 是规格，数字后紧跟单位 ⇒ 不会被匹配）
+    const pm = l.match(/(\d+(?:\.\d+)?)\s*\/\s*件/);
+    if (pm) {
+      const t = targetFor('price');
+      if (t) {
+        t.price = toNum(pm[1]);
+        continue;
+      }
+    }
+    // 数量：`1件` / `5件`
+    const qm = l.match(/^(\d+)\s*件$/);
+    if (qm) {
+      const t = targetFor('quantity');
+      if (t) {
+        t.quantity = toNum(qm[1]);
+        continue;
+      }
+    }
+    if (/[一-龥]{2,}/.test(l) && !STOP.test(l)) {
+      // 品名或其续行（如 "农夫山泉维他命水…新包" + "装500ml(1*15)"）
+      if (!cur.name) cur.name = l;
+      else if (cur.name.length < 32) cur.name += l;
+    }
   }
+  // 丢弃没有品名的项（表头/噪声行误锚的条码）
+  for (let k = items.length - 1; k >= 0; k--) if (!items[k].name) items.splice(k, 1);
   if (items.length === 0 && total == null) return null;
+  for (const it of items) {
+    if (it.price != null && !Number.isFinite(it.price)) it.price = undefined;
+    const amt = it.price != null && it.quantity != null ? round2(it.price * it.quantity) : it.price;
+    it.amount = amt != null && Number.isFinite(amt) ? amt : undefined;
+    it.name = normalizeOcrName(cleanName(it.name));
+  }
   const bill = assembleBill(lines, text, items, 'yijiupi', []);
   if (total != null) bill.total = round2(total);
   return bill;
