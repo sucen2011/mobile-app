@@ -275,7 +275,7 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
   const showItemActions = (e: SupplierExpense) => {
     Alert.alert(
       `${e.expenseNo}`,
-      `${e.supplierName} · ${e.expenseType === 2 ? `每期 ${e.rebateQty}${e.rebateUnit || '件'}` : e.expenseType === 3 ? `铺货货值 ¥${e.consignTotalValue ?? 0}` : money(e.totalAmount)}`,
+      `${e.supplierName} · ${e.expenseType === 2 ? `每期 ${rebatePerPeriodQty(e)}${e.rebateUnit || '件'}` : e.expenseType === 3 ? `铺货货值 ¥${e.consignTotalValue ?? 0}` : money(e.totalAmount)}`,
       [
         { text: '编辑', onPress: () => startEdit(e) },
         { text: '删除', style: 'destructive', onPress: () => confirmDelete(e) },
