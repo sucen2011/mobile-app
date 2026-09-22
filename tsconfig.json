@@ -11,6 +11,7 @@
     "android",
     "ios",
     "node_modules_sdk54_old",
-    "export-test-sdk57"
+    "export-test-sdk57",
+    "scratch"
   ]
 }
