@@ -68,17 +68,17 @@ describe('进货单解析器 · 真实样本回归', () => {
 
   // ── 以下为 12 张样本的结构性锁定（防回退）；真值待逐张人工核对后收紧 ──
   const cases: Array<{ file: string; format: string; items: number; total: number | null; note: string }> = [
-    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 13, total: 196, note: '常州翀通(销售单) 第1/5页（总额取明细合计）' },
+    { file: 'fmt01.ocr.txt', format: 'pinshi', items: 12, total: 196, note: '常州翀通(销售单) 第1/5页（总额取明细合计）' },
     { file: 'fmt02.ocr.txt', format: 'jd-wanshang', items: 1, total: null, note: '京东万商 单品' },
-    { file: 'fmt03.ocr.txt', format: 'pinshi', items: 7, total: 329, note: '常州好亦来(访销单)' },
-    { file: 'fmt04.ocr.txt', format: 'pinshi', items: 8, total: 166.5, note: '常州礼雯(出库单)' },
+    { file: 'fmt03.ocr.txt', format: 'pinshi', items: 6, total: 329, note: '常州好亦来(访销单)' },
+    { file: 'fmt04.ocr.txt', format: 'pinshi', items: 6, total: 166.5, note: '常州礼雯(出库单)' },
     { file: 'fmt05.ocr.txt', format: 'pinshi', items: 15, total: 1103.24, note: '金达(09-14 单，条码锚点修复后 9→15)' },
     { file: 'fmt06.ocr.txt', format: 'pinshi', items: 3, total: 805, note: '常州天齐(销售单)' },
     { file: 'fmt07.ocr.txt', format: 'yijiupi', items: 9, total: 1205.87, note: '易久批订单（列交织 → 单遍状态机，价/额齐全）' },
     { file: 'fmt08.ocr.txt', format: 'lizhen', items: 4, total: 600, note: '励贞配送单 第1页' },
     { file: 'fmt09.ocr.txt', format: 'lizhen', items: 4, total: 732.94, note: '励贞配送单 第2页' },
     { file: 'fmt10.ocr.txt', format: 'pinshi', items: 1, total: 48, note: '鸣凰亚昌（另一份 OCR）' },
-    { file: 'fmt11.ocr.txt', format: 'jd-wanshang', items: 16, total: 189.02, note: '京东万商 共3页' },
+    { file: 'fmt11.ocr.txt', format: 'jd-wanshang', items: 11, total: 209.01, note: '京东万商 共3页（双码合并后 16→11）' },
     { file: 'fmt12.ocr.txt', format: 'jd-wanshang', items: 10, total: 190.04, note: '京东万商 12 条' },
   ];
 
@@ -105,11 +105,11 @@ describe('进货单解析器 · 真实样本回归', () => {
   }
 
   /**
-   * 已知缺陷（预期失败）：常州礼雯出库单的首条明细把「地址行」当成了品名。
+   * 曾为已知缺陷（已修复）：常州礼雯出库单首条曾把「地址行/收货人碎片」当品名。
    * 这是待修问题（名称噪声过滤 `isProductNameLine`）；修好后本用例会「意外通过」，
    * 届时请把它改成正常断言。
    */
-  it.fails('【已知缺陷】fmt04 首条不应是地址行', () => {
+  it('fmt04 首条应为真实商品（曾误取地址行/收货人碎片，已修）', () => {
     if (!has('fmt04.ocr.txt')) return;
     const bill = parsePurchaseBill(read('fmt04.ocr.txt'));
     const first = String(bill.items[0]?.name || '');

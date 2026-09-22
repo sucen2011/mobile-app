@@ -1410,6 +1410,9 @@ function isBarcodeRow(line: string): boolean {
 function classifyPinShiGroup(group: string[]): BillItem | null {
   let barcode = '';
   const nameParts: string[] = [];
+  /** 组内「首个商品行之前」出现的孤立短中文行（≤2 字，如 fmt04 的「贝贝」＝收货人碎片）；
+   *  仅当整组再无其他品名时才回退使用（保护「味精」这类真·两字品名）。 */
+  let leadingShort: string | undefined;
   let qty: number | undefined;
   let unit: string | undefined;
   const decimals: { v: number; i: number }[] = [];
@@ -1486,6 +1489,13 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
     if (/[一-龥]{2,}/.test(line) && !NAME_EXCLUDE.test(line)) {
       // 地址/页脚噪声行（路/号/欠款/累计…）不当品名：避免首条明细变成地址行（fmt04）
       if (ADDRESS_NOISE.test(line) && !extractBarcode(line)) return;
+      // 「表头块之后、首个含条码/价格的商品行之前」的孤立短中文行（≤2 字，如 fmt04 的「贝贝」＝收货人碎片）：
+      // 先寄存在 leadingShort，若本组随后取到了真正的品名则不采用它；
+      // 若整组再无其他品名（某商品名真的只有 2 个字，如「味精」），再回退使用，避免误杀短品名。
+      if (line.replace(/[^\u4e00-\u9fa5]/g, '').length <= 2 && !barcode && nameParts.length === 0 && decimals.length === 0) {
+        leadingShort = line;
+        return;
+      }
       nameParts.push(line);
       return;
     }
@@ -1533,8 +1543,11 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
   }
 
   let name = nameParts.join(' ').replace(SPEC_RE, ' ').replace(/\s{2,}/g, ' ').trim();
+  if (!name && leadingShort) name = leadingShort; // 整组无其他品名时才回退（保护两字品名）
   name = normalizeOcrName(cleanName(name));
   if (!name) return null;
+  // 既无条码、也无单价/金额 ⇒ 不是商品行（单据头/地址块被误分组，如 fmt04 的「贝贝」），丢弃
+  if (!barcode && price == null && amount == null) return null;
   const item: BillItem = { name, barcode, unit, quantity: qty, price, amount };
   if (discount != null && discount > 0) item.discount = discount;
   if (qty == null || price == null) item.suspect = true;
@@ -1609,10 +1622,20 @@ function extractJdWanshang(lines: string[], text: string): PurchaseBill | null {
   // 订单号/运单号（如 "订单号:ESL00000025535540188" / "JDVA46590679507"）不以数字开头，
   // 不会误锚；订单号里夹的 13 位数字子串也因不在行首而被排除。
   const anchors: { idx: number; barcode: string }[] = [];
+  const secondCodes = new Set<number>(); // 同商品的第二个码所在行（噪声，不参与名称/数值）
   lines.forEach((l, i) => {
     const cleaned = l.replace(/,/g, '').trim();
     const m = cleaned.match(/^(\d{12,14})/);
-    if (m) anchors.push({ idx: i, barcode: m[1] });
+    if (!m) return;
+    // 京东单「商品条码」格常含**两个码**（原单码 + 后单码/生产日期+编码，如 `100006631176,6` 与 `925568500882`、
+    // `230314,6934660`）：后者紧邻上一个锚点（≤3 行）时**不是新商品**，而是同一商品的第二码。
+    // 若误当新锚点，会把一个商品劈成两条，且**两条都丢数量/单价/金额**（fmt11 的现象）。
+    const prev = anchors[anchors.length - 1];
+    if (prev && i - prev.idx <= 3) {
+      secondCodes.add(i);
+      return;
+    }
+    anchors.push({ idx: i, barcode: m[1] });
   });
   if (anchors.length === 0) return null;
   const items: BillItem[] = [];
@@ -1628,7 +1651,15 @@ function extractJdWanshang(lines: string[], text: string): PurchaseBill | null {
     const decimalsAfterQty: number[] = [];
     let qty: number | undefined;
     let qtySeen = false;
-    for (const bl of block) {
+    for (let bi = 0; bi < block.length; bi++) {
+      const raw = block[bi];
+      // 同商品的「第二个码」所在行：剥掉码本身，保留其后的真实品名
+      // （如 `230404,6924187 洽洽150g香瓜子` → `洽洽150g香瓜子`；整行只有码则跳过）
+      let bl = raw;
+      if (secondCodes.has(a.idx + 1 + bi)) {
+        bl = raw.replace(/^[\d,]{8,}\s*/, '').trim();
+        if (!bl) continue;
+      }
       if (/^(折扣|商品条码|商品名称|原单|后单|生产日期|后总|价|数量|序号|名称|折扣后)/.test(bl)) continue;
       if (/^\d{4}[-/年]\d/.test(bl)) continue; // 生产日期/打印日期
       const allDec = bl.match(/\d+\.\d{1,2}/g);
