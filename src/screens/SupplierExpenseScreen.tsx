@@ -56,6 +56,15 @@ function money(n: number): string {
 function round(n: number): number {
   return Math.round(Number(n) || 0);
 }
+// 取「每期返货量」：后端对按计划分期的返货把 rebateQty 存成【总量】（如每期10×3期=30），
+// 列表/详情若直接拿 rebateQty 标「每期」会误显成「每期30」。正确单期量应从 rebatePlanItems[0].items 求和。
+function rebatePerPeriodQty(e: any): number {
+  const plan = Array.isArray(e && e.rebatePlanItems) ? e.rebatePlanItems : [];
+  if (plan.length && Array.isArray(plan[0].items) && plan[0].items.length) {
+    return plan[0].items.reduce((s: number, it: any) => s + (Number(it.qty) || 0), 0);
+  }
+  return Number(e && e.rebateQty) || 0;
+}
 function toAbsoluteUrl(baseUrl: string, url: string): string {
   if (!url) return '';
   if (/^https?:\/\//i.test(url)) return url;
@@ -92,14 +101,11 @@ export interface RebatePeriod {
 // settlements 用于把每一期的「备注 + 凭证图片」挂到对应期次卡片上（按 rebate_seq 关联），三端一致
 function buildRebatePeriods(e: any, settlements: any[] = []): RebatePeriod[] {
   if (!e || !isRebateLikeExpense(e)) return [];
-  const { rebateStartDate, rebateCycle, rebateQty, rebateTotalPeriods, settledAmount, nextRebateDate, rebateSettledPeriods } = e;
-  if (!rebateStartDate || !rebateQty) return [];
-  const stepMonths = REBATE_STEP_MONTHS[rebateCycle] || 0;
   // 已确认期次来自 rebateSettledPeriods（数组）；老数据回退按 settledAmount 视为 1..N（与 PC 一致）
-  const settledSeqs: number[] = Array.isArray(rebateSettledPeriods)
-    ? rebateSettledPeriods.map(Number).filter((n: number) => n >= 1)
-    : ((Math.round(Number(settledAmount) || 0) > 0)
-        ? Array.from({ length: Math.round(Number(settledAmount) || 0) }, (_: any, i: number) => i + 1)
+  const settledSeqs: number[] = Array.isArray(e.rebateSettledPeriods)
+    ? e.rebateSettledPeriods.map(Number).filter((n: number) => n >= 1)
+    : ((Math.round(Number(e.settledAmount) || 0) > 0)
+        ? Array.from({ length: Math.round(Number(e.settledAmount) || 0) }, (_: any, i: number) => i + 1)
         : []);
   // 每期对应一笔 is_rebate=1 且非冲正的结算（取最新一笔），用于回显备注与凭证
   const settleBySeq = new Map<number, any>();
@@ -109,6 +115,31 @@ function buildRebatePeriods(e: any, settlements: any[] = []): RebatePeriod[] {
     if (!seq) return;
     settleBySeq.set(seq, s);
   });
+  // —— 优先采用后端逐期 rebatePlanItems（带真实 planDate）——
+  // 与 PC 详情口径一致：这是期次真值。原兜底推算在 rebateCycle=0（旧季度单 / 模板未回填周期）时
+  // 会把 stepMonths 算成 0、第 2 期起全取 nextRebateDate（同一天），导致「所有批次时间都一样」。
+  // 直接采用后端逐期日期可根治；仅当无逐期数据时才回退到下方标量推算。
+  if (Array.isArray(e.rebatePlanItems) && e.rebatePlanItems.length > 0 && e.rebatePlanItems.every((p: any) => p && p.planDate)) {
+    return e.rebatePlanItems.map((p: any, idx: number) => {
+      const seq = Number(p.seq) || idx + 1;
+      const isSettled = settledSeqs.indexOf(seq) >= 0 || p.status === 'received' || !!p.settledDate;
+      const seqSettle = settleBySeq.get(seq);
+      const planQty = Array.isArray(p.items) && p.items.length
+        ? p.items.reduce((s: number, it: any) => s + (Number(it.qty) || 0), 0)
+        : Number(e.rebateQty) || 0;
+      return {
+        seq,
+        planDate: p.planDate,
+        planQty,
+        settled: isSettled,
+        remark: p.remark || seqSettle?.remark || '',
+        images: (seqSettle?.images || []).map((im: any) => ({ url: im.imageUrl })),
+      };
+    });
+  }
+  const { rebateStartDate, rebateCycle, rebateQty, rebateTotalPeriods, nextRebateDate } = e;
+  if (!rebateStartDate || !rebateQty) return [];
+  const stepMonths = REBATE_STEP_MONTHS[rebateCycle] || 0;
   const total = Number(rebateTotalPeriods) || 0;
   // 固定周期：生成全部期次；不限期数（长期有效）：展示 已收 + 全部逾期 + 下一期待结，
   // 即向后推到包含首个未到期（待结）期为止；自定义周期不推断未来日期，仅保留已收+下一期。
@@ -412,6 +443,9 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                     0,
                   )
                 : 0;
+              // 寄售返货按计划分期：consignReturnTotalQty 是「各期合计」，需拆成「每期/期数」展示，避免误读成「每期=合计」
+              const consignReturnPeriods = (Array.isArray(e.rebatePlanItems) ? e.rebatePlanItems.length : 0) || e.rebateTotalPeriods || 1;
+              const consignReturnPerPeriod = consignReturnPeriods > 0 ? Math.round(consignReturnTotalQty / consignReturnPeriods) : consignReturnTotalQty;
               return (
                 <View key={e.id} style={[styles.itemCard, i > 0 && { marginTop: theme.spaceScale[3] }]}>
                   <TouchableOpacity style={styles.itemMain} onPress={() => openDetail(e.id)} activeOpacity={0.7}>
@@ -426,11 +460,15 @@ export default function SupplierExpenseScreen({ baseUrl, onBack }: Props) {
                       {isConsign ? (
                         // 寄售单：金额/返货数量 + 到期日（纯「货物处置提醒」语义，与结算触发与否无关）
                         <Text style={styles.itemAmount}>{`${
-                          isConsignRebate ? `返货 ${round(consignReturnTotalQty)} 件` : money(e.totalAmount)
+                          isConsignRebate
+                            ? (consignReturnPeriods > 1
+                                ? `返货 每期${round(consignReturnPerPeriod)}件·共${consignReturnPeriods}期`
+                                : `返货 ${round(consignReturnTotalQty)} 件`)
+                            : money(e.totalAmount)
                         }${e.maturityDate ? ` · 到期日：${e.maturityDate}` : ''}`}</Text>
                       ) : isRebate ? (
                         <>
-                          <Text style={styles.itemAmount}>{`每期 ${round(e.rebateQty)}${e.rebateUnit || '件'}`}</Text>
+                          <Text style={styles.itemAmount}>{`每期 ${round(rebatePerPeriodQty(e))}${e.rebateUnit || '件'}`}</Text>
                           <Text style={styles.itemUnsettled}>{`已返 ${round(e.settledAmount)} 期`}</Text>
                         </>
                       ) : (
@@ -864,7 +902,7 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>返货协议（{REBATE_CYCLE_LABEL[e.rebateCycle as RebateCycle] || '每月'}返）</Text>
           <InfoRow label="关联商品" value={e.productName || '—'} />
-          <InfoRow label="每期" value={`${round(e.rebateQty)}${e.rebateUnit || '件'}`} />
+          <InfoRow label="每期" value={`${round(rebatePerPeriodQty(e))}${e.rebateUnit || '件'}`} />
           <InfoRow label="首期日期" value={e.rebateStartDate || '—'} />
           <InfoRow label="下次返货" value={e.nextRebateDate || '—'} />
           <InfoRow label="到期时间" value={e.maturityDate ? e.maturityDate : '长期（不限）'} />
@@ -2726,7 +2764,7 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
                   ) : null}
                   <View style={styles.card}>
                     <InfoRow label="关联商品" value={`${target.productName || '—'}`} />
-                    <InfoRow label="每期" value={`${round(target.rebateQty)}${target.rebateUnit || '件'}`} />
+                    <InfoRow label="每期" value={`${round(rebatePerPeriodQty(target))}${target.rebateUnit || '件'}`} />
                     <InfoRow label="本期（下次）" value={rebateSelPeriod?.planDate || target.nextRebateDate || '—'} />
                     <InfoRow label="说明" value={Number(target?.rebateTotalPeriods) === 1 ? '确认后本期结清，无需再推进' : '确认后记为「返货确认」并自动推进下一期'} />
                   </View>
