@@ -8,5 +8,5 @@
 // 无法在 JS 侧读取原生版本号。原先 Settings 里把 "v1.0" 直接写死在 UI 文本里，
 // 导致换了多少版包都显示 v1.0（用户无法据此判断新包是否装上）。改为集中常量后，
 // 至少做到「一处维护、发版必改」，不会再出现永远不变的情况。
-export const APP_VERSION = '1.1.5';
-export const APP_VERSION_CODE = 16;
+export const APP_VERSION = '1.1.6';
+export const APP_VERSION_CODE = 17;

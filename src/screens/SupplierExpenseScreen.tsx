@@ -7,6 +7,7 @@ import dayjs from 'dayjs';
 // ⚠️ 必须从 expo-file-system/legacy 导入：SDK 54+ 主入口的 writeAsStringAsync 是调用即 throw 的弃用桩
 import * as FileSystem from 'expo-file-system/legacy';
 import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import { useTheme } from '../theme/ThemeProvider';
 import { SafeAreaHeader } from '../components/SafeArea';
 import DatePickerField from '../components/DatePickerField';
@@ -1398,6 +1399,20 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       Alert.alert('上传失败', e?.message || '');
     }
   };
+  // 从相册选择凭证图片（与拍照同一上传通道；选择器会把图片拷到缓存并返回本地 file:// uri）
+  const pickImage = async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { Alert.alert('需要相册权限才能选择图片'); return; }
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, exif: false });
+      if (res.canceled || !res.assets?.[0]?.uri) return;
+      const name = (supplierName || '单据').replace(/\s+/g, '');
+      const url = await uploadExpenseImage(baseUrl, res.assets[0].uri, name, expenseDate);
+      setImages((prev) => [...prev, url]);
+    } catch (e: any) {
+      Alert.alert('上传失败', e?.message || '');
+    }
+  };
 
   // 切换费用类型时清掉不相关字段，避免提交脏数据（如寄售字段混进返钱单）
   const setExpenseTypeSafe = (k: ExpenseType) => {
@@ -2409,6 +2424,9 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
           <TouchableOpacity style={styles.imgAdd} onPress={openCamera} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Text style={styles.imgAddText}>＋ 拍照</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.imgAdd} onPress={pickImage} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <Text style={styles.imgAddText}>＋ 相册</Text>
+          </TouchableOpacity>
         </View>
 
         <TouchableOpacity style={[styles.saveBtn, saving && { opacity: 0.6 }]} disabled={saving} onPress={submit}>
@@ -2576,6 +2594,20 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
       Alert.alert('上传失败', e?.message || '');
     }
   };
+  // 从相册选择凭证图片（与拍照同一上传通道，最多 3 张）
+  const pickImage = async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { Alert.alert('需要相册权限才能选择图片'); return; }
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, exif: false });
+      if (res.canceled || !res.assets?.[0]?.uri) return;
+      const name = (target?.supplierName || '费用单').replace(/\s+/g, '');
+      const url = await uploadExpenseImage(baseUrl, res.assets[0].uri, name, todayStr());
+      setSettleImages((prev) => [...prev, url].slice(0, 3));
+    } catch (e: any) {
+      Alert.alert('上传失败', e?.message || '');
+    }
+  };
   const renderSettleImages = () => (
     <View>
       <Text style={styles.fieldLabel}>凭证图片（最多3张）</Text>
@@ -2590,11 +2622,14 @@ function SettleModal({ theme, styles, baseUrl, target, settlements, presetPlanSe
               </TouchableOpacity>
             </View>
           ))}
-        {settleImages.length < 3 ? (
           <TouchableOpacity style={styles.imgAdd} onPress={openCamera} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Text style={styles.imgAddText}>＋ 拍照</Text>
           </TouchableOpacity>
-        ) : null}
+          {settleImages.length < 3 ? (
+            <TouchableOpacity style={styles.imgAdd} onPress={pickImage} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Text style={styles.imgAddText}>＋ 相册</Text>
+            </TouchableOpacity>
+          ) : null}
       </View>
     </View>
   );
