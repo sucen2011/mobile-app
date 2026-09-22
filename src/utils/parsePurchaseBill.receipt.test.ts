@@ -70,7 +70,7 @@ describe('进货单解析器 · 真实样本回归', () => {
   const cases: Array<{ file: string; format: string; items: number; total: number | null; note: string }> = [
     { file: 'fmt01.ocr.txt', format: 'pinshi', items: 12, total: 196, note: '常州翀通(销售单) 第1/5页（总额取明细合计）' },
     { file: 'fmt02.ocr.txt', format: 'jd-wanshang', items: 1, total: null, note: '京东万商 单品' },
-    { file: 'fmt03.ocr.txt', format: 'pinshi', items: 6, total: 329, note: '常州好亦来(访销单)' },
+    { file: 'fmt03.ocr.txt', format: 'pinshi', items: 7, total: 329, note: '常州好亦来(访销单)（ glued 误劈修复后找回第 5 行，6→7）' },
     { file: 'fmt04.ocr.txt', format: 'pinshi', items: 6, total: 166.5, note: '常州礼雯(出库单)' },
     { file: 'fmt05.ocr.txt', format: 'pinshi', items: 15, total: 1103.24, note: '金达(09-14 单，条码锚点修复后 9→15)' },
     { file: 'fmt06.ocr.txt', format: 'pinshi', items: 3, total: 805, note: '常州天齐(销售单)' },
@@ -149,5 +149,56 @@ describe('进货单解析器 · 真实样本回归', () => {
     expect(bill.items.length).toBeGreaterThan(0);
     const nm = String(bill.items[0].name);
     expect(nm).not.toMatch(/加盟|总件数|包裹数|支付方式|客服|扫码|无忧|签约/);
+  });
+
+  it('好亦来访销单：条码首位恰为期望序号不再误劈组，7 条齐全且合计=票面 329 [原图核对]', () => {
+    if (!has('haoyilai.ocr.txt')) return;
+    const bill = parsePurchaseBill(read('haoyilai.ocr.txt'));
+    expect(bill.format).toBe('pinshi');
+    expect(bill.supplierName).toBe('常州好亦来商贸有限公司');
+    expect(bill.orderNo).toBe('XD260311000035');
+    expect(bill.items).toHaveLength(7);
+    // 曾被「序号6+条码粘连」误判劈掉的第 5 行（条码 6937962111540 首位=期望序号 6）
+    const it5 = bill.items[4];
+    expect(it5.name).toBe('康师傅袋番茄鸡蛋牛肉');
+    expect(it5.barcode).toBe('6937962111540');
+    expect(it5.quantity).toBe(1);
+    expect(it5.price).toBeCloseTo(57.5, 2);
+    expect(it5.amount).toBeCloseTo(57.5, 2);
+    // 手写「苏花未付」与页脚词不得混进任何品名
+    for (const it of bill.items) expect(String(it.name)).not.toMatch(/苏花未付|扫码|小程序/);
+    const sum = bill.items.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    expect(sum).toBeCloseTo(329, 2); // = 票面「合计金额:329.00」
+    expect(bill.total).toBeCloseTo(329, 2);
+  });
+
+  it('礼雯出库单：小数数量 0.5 箱可解析、页脚广告不成条、合计=实付 166.50 [原图核对]', () => {
+    if (!has('liwenxd.ocr.txt')) return;
+    const bill = parsePurchaseBill(read('liwenxd.ocr.txt'));
+    expect(bill.format).toBe('pinshi');
+    expect(bill.supplierName).toBe('常州礼雯副食品商行');
+    expect(bill.orderNo).toBe('XD260901000270');
+    expect(bill.items).toHaveLength(6);
+    // 前两行数量是 0.5 箱（半箱）——旧实现只认整数导致数量丢失、金额=0
+    const it1 = bill.items[0];
+    expect(it1.name).toBe('统一杯汤达人日式豚骨拉面');
+    expect(it1.barcode).toBe('6925303770563');
+    expect(it1.quantity).toBeCloseTo(0.5, 2);
+    expect(it1.unit).toBe('箱');
+    expect(it1.price).toBeCloseTo(50, 2);
+    expect(it1.amount).toBeCloseTo(25, 2);
+    const it2 = bill.items[1];
+    expect(it2.quantity).toBeCloseTo(0.5, 2);
+    expect(it2.amount).toBeCloseTo(37.5, 2);
+    // 页脚广告/手写噪声绝不能成为明细或混进品名
+    for (const it of bill.items) {
+      const nm = String(it.name);
+      expect(nm).not.toMatch(/小程序|扫码|领红包|注册搜索/);
+      expect(nm).not.toMatch(/拼弹|苏花未付/);
+    }
+    const sum = bill.items.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    expect(sum).toBeCloseTo(166.5, 2); // = 票面「小计 / 实付金额 166.50」
+    expect(bill.total).toBeCloseTo(166.5, 2);
+    expect(bill.paid).toBeCloseTo(166.5, 2);
   });
 });

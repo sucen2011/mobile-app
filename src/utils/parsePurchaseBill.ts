@@ -177,7 +177,7 @@ function parseSupplier(lines: string[]): string | undefined {
   }
 
   // 单据后缀；末尾裸"单"用负向后瞻排除"账单/名单/对账单/菜单"等误匹配
-  const DOC_SUFFIX = /(?:销售单|购物清单|访销单|仿销单|送货单|销货单|出货单|发货单|批发单|供货单|配货单|销售清单|采购单|订单|清单|单据|(?<![账名对菜])单)$/;
+  const DOC_SUFFIX = /(?:销售单|购物清单|访销单|仿销单|送货单|销货单|出货单|出库单|发货单|批发单|供货单|配货单|销售清单|采购单|订单|清单|单据|(?<![账名对菜])单)$/;
   const BIZ_TAIL = /(专卖店|直销点|批发部|经营部|门市部|门市)$/;
   // 手写备注（如"欠原计支+34听"）绝不能混入供应商名
   const HANDWRITING = /(欠|\+|听|\*|×|x|X)/;
@@ -189,7 +189,7 @@ function parseSupplier(lines: string[]): string | undefined {
     const clean = t.replace(/[【】\[\]()（）]/g, '');
     if (DOC_SUFFIX.test(clean) && /[一-龥]/.test(clean)) {
       let name = clean.replace(DOC_SUFFIX, '').replace(BIZ_TAIL, '').trim();
-      name = stripSupplierNoise(name);
+      name = stripSupplierNoise(name).replace(/[.。:：,，、\s]+$/, '').trim();
       if (name && name.length >= 2 && name.length <= 30 && !GARBAGE.test(name) && !(name.length <= 3 && /^(批发|销售|送货|供货|发货|出货|零售|经销|代理)$/.test(name))) {
         return name;
       }
@@ -198,7 +198,9 @@ function parseSupplier(lines: string[]): string | undefined {
   };
 
   let best: string | undefined;
-  for (let window = 3; window >= 2; window--) {
+  // window=1：抬头独立成行的单据（好亦来「常州好亦来商贸有限公司(访销单)」）——
+  // 相邻行常是页码/打印时间（带 GARBAGE 词），只靠 2~3 行拼接永远取不到
+  for (let window = 3; window >= 1; window--) {
     for (let i = 0; i <= lines.length - window; i++) {
       const combined = lines.slice(i, i + window).join('').replace(/\s+/g, '').trim();
       const got = tryExtractTitle(combined);
@@ -1356,8 +1358,14 @@ const ADDRESS_NOISE = /(路|号|欠款|累计|新村|栋|室|广场|大厦|市�
  */
 function gluedSeqLen(l: string, expectedSeq: number | null): number {
   if (expectedSeq == null) return 0;
-  const m = l.trim().match(/^(\d{1,2})(\d{12,14})/);
+  const t = l.trim();
+  const m = t.match(/^(\d{1,2})(\d{12,14})/);
   if (!m) return 0;
+  // 条码之后必须还有品名等非数字内容，才算「序号+条码粘连」；
+  // 纯条码行绝不能劈开：好亦来单 6937962111540 的首位 6 恰等于期望序号 6，
+  // 若按粘连处理会把一行商品劈成两个半组、双双丢弃（漏行且合计变 271.50）。
+  const rest = t.slice(m[1].length + m[2].length);
+  if (!/[一-龥A-Za-z]/.test(rest)) return 0;
   return Number(m[1]) === expectedSeq ? m[1].length : 0;
 }
 
@@ -1376,7 +1384,7 @@ function isSeqLine(l: string, nextLine: string, expectedSeq: number | null = nul
   const t = l.trim();
   if (gluedSeqLen(l, expectedSeq) > 0) return true; // 序号+条码无分隔粘连
   if (!BARE_SEQ_RE.test(t) && !GLUED_SEQ_RE.test(t)) return false;
-  if (/^\d{1,3}\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)/.test(t)) return false; // 数量+单位（注意：单位是非 ASCII，不能用 \b）
+  if (/^\d{1,3}\s*(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包|杯|碗|座|支|双|套|枚|扎)/.test(t)) return false; // 数量+单位（注意：单位是非 ASCII，不能用 \b）；杯/座等包装数量列（礼雯单「6杯/6座」）也不是序号
   if (/^\d+\s*[*xX×]/.test(t)) return false; // 规格
   if (/^\d{1,3}\s*中包/.test(t)) return false;
   // 裸整数须后接条码或品名（而非单位/数字）才认作序号；否则是数量单元格
@@ -1384,7 +1392,7 @@ function isSeqLine(l: string, nextLine: string, expectedSeq: number | null = nul
     const nx = nextLine.trim();
     // 序号后若紧跟纯单位词（箱/袋/瓶…），说明本行是「数量」单元格，绝不当序号，
     // 否则会把数量误判为新组起点，截断分组、丢量丢价（如 fmt01 的 "3 袋"）。
-    if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)$/.test(nx)) return false;
+    if (/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包|杯|碗|座|支|双|套|枚|扎)$/.test(nx)) return false;
     // 后接「纯 12~13 位条码」：凡「无序号链可依」（本单第一行）或「恰为期望序号」时，
     // 仍按序号行处理（如鸣凰单 `1` + `6932006225702`：1 是序号、条码是下一列）；
     // 只有已建立序号链且数字与之不符时，才视作「数量单元格 + 商品条码列」，避免截断上一商品分组。
@@ -1421,11 +1429,12 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
   group.forEach((rawLine, gi) => {
     let line = rawLine.trim();
     if (!line) return;
-    if (BARE_SEQ_RE.test(line)) {
+    if (BARE_SEQ_RE.test(line) || /^\d{1,3}\.\d{1,2}$/.test(line)) {
       if (gi === 0) return; // 序号行
       const nx = group[gi + 1] ? group[gi + 1].trim() : '';
       // 仅当数量尚未定位、且后接纯单位词时，本行才是「数量」；否则视作价格/金额数值，继续往下走。
-      if (qty === undefined && /^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包)$/.test(nx)) {
+      // 小数同样成立（礼雯单「0.5 箱」＝半箱）：若不接，0.5 会掉进金额候选被当成「优惠」、数量丢失。
+      if (qty === undefined && Number(line) > 0 && /^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包|杯|碗|座|支|双|套|枚|扎)$/.test(nx)) {
         qty = Number(line);
         return;
       }
@@ -1461,7 +1470,7 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
             }
             return;
         }
-    const uw = line.match(/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根)$/); // 裸单位词
+    const uw = line.match(/^(箱|瓶|包|个|袋|盒|件|条|桶|提|只|听|罐|根|中包|杯|碗|座|支|双|套|枚|扎)$/); // 裸单位词
     if (uw) {
       if (!unit) unit = uw[1];
       return;
@@ -1489,6 +1498,15 @@ function classifyPinShiGroup(group: string[]): BillItem | null {
     if (/[一-龥]{2,}/.test(line) && !NAME_EXCLUDE.test(line)) {
       // 地址/页脚噪声行（路/号/欠款/累计…）不当品名：避免首条明细变成地址行（fmt04）
       if (ADDRESS_NOISE.test(line) && !extractBarcode(line)) return;
+      // 页脚广告/小程序推广（如礼雯单「小程序上线!注册搜索:礼嘉苏皖副食品商行注册扫码领红包」）
+      // 绝不当品名，否则会单独成条并把「实付金额」吞成它的单价/金额
+      if (/(小程序|注册扫码|扫码领红包|注册搜索|公众号|二维码)/.test(line)) return;
+      // 手写尾注/结算摘要（苏花未付＝好亦来单手写；3大2小＝「订单数量合计」的值）
+      if (/^(苏花未付|款未付|未付款|已付款|款未结|货已收|已收货|欠款人签字|欠款)$/.test(line)) return;
+      if (/^\d+\s*大\s*\d+\s*小\s*$/.test(line)) return;
+      // 已有条码与品名后的孤立 1~2 字碎片（页边手写/OCR 噪声，如「拼」「拼弹!」）不当品名
+      const hanOnly = line.replace(/[^\u4e00-\u9fa5]/g, '');
+      if (barcode && nameParts.length > 0 && (hanOnly.length <= 1 || (hanOnly.length <= 2 && /[!！?？。，,;；:：]/.test(line)))) return;
       // 「表头块之后、首个含条码/价格的商品行之前」的孤立短中文行（≤2 字，如 fmt04 的「贝贝」＝收货人碎片）：
       // 先寄存在 leadingShort，若本组随后取到了真正的品名则不采用它；
       // 若整组再无其他品名（某商品名真的只有 2 个字，如「味精」），再回退使用，避免误杀短品名。
