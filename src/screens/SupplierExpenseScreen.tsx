@@ -25,6 +25,7 @@ import type { Product } from '../db/localDb';
 // CSV 导出与状态文案已抽成零依赖纯模块（可被 PC 侧测试跨仓引用），见 utils/expenseCsv.ts
 import { buildExpenseCsv } from '../utils/expenseCsv';
 import { statusLabel } from '../utils/expenseLabels';
+import { buildBillingPeriods, CYCLE_LABEL, type BillingCycle } from '../utils/billingPeriod';
 
 interface Props {
   baseUrl: string;
@@ -881,8 +882,8 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
               <View style={styles.card}>
                 <Text style={styles.sectionTitle}>{`返货期次明细（逐期分期 · 已收 ${plan.filter((p) => p.status === 'received').length} / 共 ${plan.length} 期）`}</Text>
                 <View style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: theme.color.dividerApp }}>
-                  {['期次', '计划日期', '实际日期', '实际返货商品', '状态', '操作'].map((h) => (
-                    <Text key={h} style={{ flex: h === '实际返货商品' ? 1.8 : 1, fontSize: 11, fontWeight: theme.font.weight.semibold, color: theme.color.textAppSecondary }}>{h}</Text>
+                  {['期次', '覆盖期', '计划结算日', '实际结算日', '实际返货商品', '状态', '操作'].map((h) => (
+                    <Text key={h} style={{ flex: h === '实际返货商品' ? 1.8 : (h === '覆盖期' ? 1.5 : 1), fontSize: 11, fontWeight: theme.font.weight.semibold, color: theme.color.textAppSecondary }}>{h}</Text>
                   ))}
                 </View>
                 {plan.map((p) => {
@@ -890,6 +891,9 @@ function DetailBody({ theme, styles, baseUrl, detail, onSettle, onSettlePeriod, 
                   return (
                     <View key={p.seq} style={{ flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: theme.color.dividerApp }}>
                       <Text style={{ flex: 1, fontSize: 12, color: theme.color.textApp }}>{p.seq}</Text>
+                      <Text style={{ flex: 1.5, fontSize: 11, color: theme.color.textAppSecondary }}>
+                        {p.coverStart && p.coverEnd ? `${p.coverStart} ~ ${p.coverEnd}` : '—'}
+                      </Text>
                       <Text style={{ flex: 1, fontSize: 12, color: theme.color.textApp }}>{p.planDate || '—'}</Text>
                       <Text style={{ flex: 1, fontSize: 12, color: theme.color.textApp }}>{p.status === 'received' ? (p.settledDate || '—') : '—'}</Text>
                       <View style={{ flex: 1.8 }}>
@@ -1195,6 +1199,9 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     Array.isArray(e?.rebatePlanItems) && e!.rebatePlanItems.length > 0
       ? e!.rebatePlanItems.map((p: RebatePlanItem) => ({
           seq: Number(p.seq) || 0,
+          // 计费周期契约：编辑回填时保留覆盖期（旧数据无 → undefined）
+          coverStart: p.coverStart || undefined,
+          coverEnd: p.coverEnd || undefined,
           planDate: p.planDate || '',
           status: (p.status === 'received' ? 'received' : 'pending') as ('pending' | 'received'),
           items: (Array.isArray(p.items) ? p.items : [blankReturnItem()]).map((it: ReturnItem) => ({ ...it })),
@@ -1247,43 +1254,65 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     setRebatePlanGlobalItems(list);
     setRebatePlanPeriods((prev) => prev.map((p) => ({ ...p, items: list.map((it) => ({ ...it })) })));
   };
-  // 快速模板：基于 总期数 + 起始月 + 统一商品 生成期次（uniform 模板每期商品相同）
-  const genRebatePlan = (template: string, stepMonths: number) => {
+  // 快速模板：基于 总期数 + 覆盖期起 + 周期 生成期次
+  // 计费周期契约（2026-09-22）：每期写入 coverStart/coverEnd，planDate = 覆盖期结束的次月 1 日
+  const genRebatePlan = (template: string, cycle: BillingCycle) => {
     const n = Math.max(1, Math.min(60, Math.floor(Number(rebatePlanCount.replace(/[^0-9]/g, '')) || 12)));
     const start = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
     const items = rebatePlanGlobalItems.map((it) => ({ ...it }));
     const periods: RebatePlanItem[] = [];
-    for (let i = 0; i < n; i++) {
-      const d = addMonths(start, i * stepMonths);
-      const m = Number(d.slice(5, 7));
-      const remark = template === 'seasonal' ? (peakMonths.includes(m) ? '旺季返' : '淡季返') : (template === 'quarterly' ? '按季' : '按月均摊');
-      periods.push({ seq: i + 1, planDate: d, status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark });
+    if (template === 'seasonal') {
+      // 旺季淡季：按月步长逐期判断（语义即"按月分旺淡"），同样计入覆盖期
+      for (const p of buildBillingPeriods(start, 'month', n)) {
+        const m = Number(p.coverStart.slice(5, 7));
+        periods.push({
+          seq: p.seq, coverStart: p.coverStart, coverEnd: p.coverEnd, planDate: p.planDate,
+          status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null,
+          remark: peakMonths.includes(m) ? '旺季返' : '淡季返',
+        });
+      }
+    } else {
+      const label = CYCLE_LABEL[cycle];
+      for (const p of buildBillingPeriods(start, cycle, n)) {
+        periods.push({
+          seq: p.seq, coverStart: p.coverStart, coverEnd: p.coverEnd, planDate: p.planDate,
+          status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark: label,
+        });
+      }
     }
     setRebatePlanTemplate(template);
     setRebatePlanPeriods(periods);
   };
-  const genRebateEqualMonthly = () => genRebatePlan('equal', 1);
-  const genRebateQuarterly = () => genRebatePlan('quarterly', 3);
-  const genRebateSeasonal = () => genRebatePlan('seasonal', 1);
+  const genRebateEqualMonthly = () => genRebatePlan('equal', 'month');
+  const genRebateQuarterly = () => genRebatePlan('quarterly', 'quarter');
+  const genRebateSemiannual = () => genRebatePlan('semiannual', 'half');
+  const genRebateYearly = () => genRebatePlan('yearly', 'year');
+  const genRebateSeasonal = () => genRebatePlan('seasonal', 'month');
   const genRebateCustom = () => {
     const n = Math.max(1, Math.min(60, Math.floor(Number(rebatePlanCount.replace(/[^0-9]/g, '')) || 12)));
     const start = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
     const periods: RebatePlanItem[] = [];
-    for (let i = 0; i < n; i++) {
-      periods.push({ seq: i + 1, planDate: addMonths(start, i), status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '' });
+    for (const p of buildBillingPeriods(start, 'month', n)) {
+      periods.push({
+        seq: p.seq, coverStart: p.coverStart, coverEnd: p.coverEnd, planDate: p.planDate,
+        status: 'pending', items: [blankReturnItem()], actualItems: [], settledDate: null, remark: '',
+      });
     }
     setRebatePlanTemplate('custom');
     setRebatePlanPeriods(periods);
   };
-  // 长期不限：总期数填 0 ⇒ 后端不设期数上限；自动选中「按月均摊」并预生成前 12 期（起始月起按月推），可继续「＋添加一期」
+  // 长期不限：总期数填 0 ⇒ 后端不设期数上限；自动选中「按月」并预生成前 12 期，可继续「＋添加一期」
   const rebateLongTerm = Number(rebatePlanCount) === 0;
   const genRebateLongTerm = () => {
     const n = 12;
     const start = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
     const items = rebatePlanGlobalItems.map((it) => ({ ...it }));
     const periods: RebatePlanItem[] = [];
-    for (let i = 0; i < n; i++) {
-      periods.push({ seq: i + 1, planDate: addMonths(start, i), status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark: '按月均摊' });
+    for (const p of buildBillingPeriods(start, 'month', n)) {
+      periods.push({
+        seq: p.seq, coverStart: p.coverStart, coverEnd: p.coverEnd, planDate: p.planDate,
+        status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark: '按月',
+      });
     }
     setRebatePlanTemplate('equal');
     setRebatePlanPeriods(periods);
@@ -1452,6 +1481,9 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
         payload.settleMethod = 3;
         payload.rebatePlanItems = plan.map((p) => ({
           seq: p.seq,
+          // 计费周期契约：覆盖期随期次一起上报（旧期为 undefined → null），计划结算日=覆盖期结束的次月 1 日
+          coverStart: p.coverStart ? p.coverStart.slice(0, 10) : null,
+          coverEnd: p.coverEnd ? p.coverEnd.slice(0, 10) : null,
           planDate: p.planDate.trim().slice(0, 10),
           status: 'pending',
           items: p.items.map((it) => ({
@@ -1896,12 +1928,14 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                     <DatePickerField value={rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : rebatePlanStart} onChange={(v: string) => setRebatePlanStart(v.slice(0, 7))} title="起始月" />
                   </View>
                 </View>
-                <Text style={styles.fieldLabel}>快速模板</Text>
+                <Text style={styles.fieldLabel}>周期（每期=一个覆盖期，计划结算日=覆盖期结束的次月 1 日）</Text>
                 <View style={styles.chipRow}>
-                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'equal' && styles.chipActive]} onPress={genRebateEqualMonthly}><Text style={[styles.chipText, rebatePlanTemplate === 'equal' && styles.chipTextActive]}>按月均摊</Text></TouchableOpacity>
-                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'quarterly' && styles.chipActive]} onPress={genRebateQuarterly}><Text style={[styles.chipText, rebatePlanTemplate === 'quarterly' && styles.chipTextActive]}>按季</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'equal' && styles.chipActive]} onPress={genRebateEqualMonthly}><Text style={[styles.chipText, rebatePlanTemplate === 'equal' && styles.chipTextActive]}>{CYCLE_LABEL.month}</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'quarterly' && styles.chipActive]} onPress={genRebateQuarterly}><Text style={[styles.chipText, rebatePlanTemplate === 'quarterly' && styles.chipTextActive]}>{CYCLE_LABEL.quarter}</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'semiannual' && styles.chipActive]} onPress={genRebateSemiannual}><Text style={[styles.chipText, rebatePlanTemplate === 'semiannual' && styles.chipTextActive]}>{CYCLE_LABEL.half}</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'yearly' && styles.chipActive]} onPress={genRebateYearly}><Text style={[styles.chipText, rebatePlanTemplate === 'yearly' && styles.chipTextActive]}>{CYCLE_LABEL.year}</Text></TouchableOpacity>
                   <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'seasonal' && styles.chipActive]} onPress={genRebateSeasonal}><Text style={[styles.chipText, rebatePlanTemplate === 'seasonal' && styles.chipTextActive]}>旺季淡季</Text></TouchableOpacity>
-                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'custom' && styles.chipActive, rebateLongTerm && styles.chipDisabled]} disabled={rebateLongTerm} onPress={rebateLongTerm ? () => {} : genRebateCustom}><Text style={[styles.chipText, rebatePlanTemplate === 'custom' && styles.chipTextActive, rebateLongTerm && styles.chipTextDisabled]}>逐期自定义</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.chip, rebatePlanTemplate === 'custom' && styles.chipActive, rebateLongTerm && styles.chipDisabled]} disabled={rebateLongTerm} onPress={rebateLongTerm ? () => {} : genRebateCustom}><Text style={[styles.chipText, rebatePlanTemplate === 'custom' && styles.chipTextActive, rebateLongTerm && styles.chipTextDisabled]}>逐期独立</Text></TouchableOpacity>
                 </View>
 
                 {rebatePlanTemplate !== 'custom' ? (
@@ -1947,10 +1981,15 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                       <Text style={styles.consignItemTitle}>{`第 ${p.seq} 期`}</Text>
                       <TouchableOpacity onPress={() => removeRebatePlanPeriod(pIdx)}><Text style={styles.consignItemDel}>删除本期</Text></TouchableOpacity>
                     </View>
+                    {(p.coverStart && p.coverEnd) || p.planDate ? (
+                      <Text style={styles.hint}>
+                        {`覆盖期 ${p.coverStart && p.coverEnd ? `${p.coverStart} ~ ${p.coverEnd}` : '—'} ｜ 计划结算日 ${p.planDate || '—'}`}
+                      </Text>
+                    ) : null}
                     <View style={styles.dualRow}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.fieldLabel}>计划日期 *</Text>
-                        <DatePickerField value={p.planDate} onChange={(v: string) => setRebatePlanPeriod(pIdx, { planDate: v })} title={`第${p.seq}期日期`} />
+                        <Text style={styles.fieldLabel}>计划结算日 *</Text>
+                        <DatePickerField value={p.planDate} onChange={(v: string) => setRebatePlanPeriod(pIdx, { planDate: v })} title={`第${p.seq}期结算日`} />
                       </View>
                       <View style={{ width: 12 }} />
                       <View style={{ flex: 1 }}>

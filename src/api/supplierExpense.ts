@@ -171,6 +171,11 @@ export interface ReturnItem {
 // 后端 seParseRebatePlan 校验每期 items 非空、qty>0、planDate 严格递增；确认收货时写 actualItems（items 保持不变）。
 export interface RebatePlanItem {
   seq: number;
+  /** 覆盖期起（打堆/服务期开始）YYYY-MM-DD；旧数据无此字段 → 展示 — */
+  coverStart?: string;
+  /** 覆盖期止 YYYY-MM-DD；旧数据无此字段 → 展示 — */
+  coverEnd?: string;
+  /** 计划结算日 = 覆盖期结束的次月 1 日 */
   planDate: string;
   status: 'pending' | 'received';
   items: ReturnItem[];
