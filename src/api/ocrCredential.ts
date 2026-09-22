@@ -89,9 +89,12 @@ export async function fetchOcrCredential(
       /^https?:\/\//.test(baseUrl)
         ? baseUrl.replace(/\/+$/, '')
         : `http://${baseUrl.replace(/\/+$/, '')}`;
+    // ⚠ 必须用小写 'x-api-token'（与 apiFetch 默认头同 key）：
+    // 若写成 'X-Api-Token'，会与默认头形成【大小写不同的重复头】，Node 服务端会把
+    // 重复头合并成 "令牌, 令牌" → safeTokenEqual 比对失败 → 401（曾致「从店铺电脑获取」必失败）。
     const headers: Record<string, string> = {};
     const tk = token || (await getApiToken());
-    if (tk) headers['X-Api-Token'] = tk;
+    if (tk) headers['x-api-token'] = tk;
     const res = await apiFetch(`${full}/api/ocr/credential`, {
       method: 'GET',
       headers,
