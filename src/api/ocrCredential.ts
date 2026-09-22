@@ -4,17 +4,21 @@ import { getMeta, setMeta } from '../db/localDb';
 import { recognizeWithTencentDirect, type OcrCredential, OcrError } from '../utils/tencentOcrDirect';
 
 const OCR_CREDENTIAL_KEY = 'ocr_credential';
-// 密钥缓存有效期 7 天：过期强制回源后端刷新（店铺可能轮换了腾讯云密钥）
-const CREDENTIAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// 密钥缓存有效期 180 天：店铺电脑关机时手机靠本地缓存直连腾讯云识别。
+// 原为 7 天——到期后若电脑正好关机，缓存作废且无法刷新，识别就只剩电脑代理一条路（必失败）。
+// 现在改为：过期后**先尝试刷新**，刷新失败则继续复用旧密钥（优雅降级），保证长期可用。
+export const CREDENTIAL_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+/** 缓存有效天数（界面展示用） */
+export const CREDENTIAL_TTL_DAYS = Math.round(CREDENTIAL_TTL_MS / 86400000);
 
-/** 读取本机缓存的腾讯云 OCR 密钥；缺失/损坏/过期返回 null */
-export function getCachedCredential(): OcrCredential | null {
+/** 读取本机缓存的腾讯云 OCR 密钥。allowExpired=true 时过期也返回（用于刷新失败后的降级复用）。 */
+export function getCachedCredential(allowExpired = false): OcrCredential | null {
   const v = getMeta(OCR_CREDENTIAL_KEY);
   if (!v) return null;
   try {
     const c = JSON.parse(v) as Partial<OcrCredential & { cachedAt?: number }>;
     if (!c || !c.secretId || !c.secretKey) return null;
-    if (typeof c.cachedAt === 'number' && Date.now() - c.cachedAt > CREDENTIAL_TTL_MS) {
+    if (typeof c.cachedAt === 'number' && Date.now() - c.cachedAt > CREDENTIAL_TTL_MS && !allowExpired) {
       console.log('[ocrCredential] 密钥缓存已过期，将回源刷新');
       return null;
     }
@@ -27,6 +31,44 @@ export function getCachedCredential(): OcrCredential | null {
     /* 损坏则视为无缓存 */
   }
   return null;
+}
+
+/** 密钥缓存状态（给「设置」页展示直连可用性 / 剩余天数用） */
+export function getCredentialStatus(): {
+  has: boolean;
+  secretIdMasked: string;
+  region: string;
+  cachedAt: number | null;
+  expired: boolean;
+  daysLeft: number;
+} {
+  const v = getMeta(OCR_CREDENTIAL_KEY);
+  const empty = { has: false, secretIdMasked: '', region: '', cachedAt: null as number | null, expired: false, daysLeft: 0 };
+  if (!v) return empty;
+  try {
+    const c = JSON.parse(v) as Partial<OcrCredential & { cachedAt?: number }>;
+    if (!c || !c.secretId || !c.secretKey) return empty;
+    const cachedAt = typeof c.cachedAt === 'number' ? c.cachedAt : null;
+    const age = cachedAt ? Date.now() - cachedAt : 0;
+    const expired = age > CREDENTIAL_TTL_MS;
+    const daysLeft = cachedAt ? Math.max(0, Math.ceil((CREDENTIAL_TTL_MS - age) / 86400000)) : 0;
+    const sid = String(c.secretId);
+    return {
+      has: true,
+      secretIdMasked: sid.length > 8 ? sid.slice(0, 4) + '…' + sid.slice(-4) : '****',
+      region: c.region || 'ap-guangzhou',
+      cachedAt,
+      expired,
+      daysLeft,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/** 清除本机密钥缓存（设置页「清除密钥」用） */
+export function clearCredential(): void {
+  setMeta(OCR_CREDENTIAL_KEY, '');
 }
 
 /** 写入本机缓存（cache_meta 表，key=ocr_credential），并打上写入时间戳供 TTL 判断 */
@@ -122,6 +164,15 @@ export async function recognizeOcr(
     } catch (e: any) {
       // 不静默吞掉：明确记录，便于排查「店铺电脑不可达」导致直连一直被跳过
       console.warn('[recognizeOcr] 拉取 OCR 密钥失败，将回退后端代理：', e?.message || e);
+    }
+    // 优雅降级：刷新失败（多为店铺电脑关机）时**继续复用已过期的旧密钥**，
+    // 让「电脑关机也能识别」成立；直连若仍失败会再回退后端，失败信息照旧可读。
+    if (!cred) {
+      const stale = getCachedCredential(true);
+      if (stale) {
+        cred = stale;
+        console.warn('[recognizeOcr] 密钥已过期且无法刷新（店铺电脑不可达），复用旧密钥直连');
+      }
     }
   }
 

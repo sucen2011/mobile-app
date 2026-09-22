@@ -4,6 +4,13 @@ import { useTheme } from '../theme/ThemeProvider';
 import { DEVICE_ID, getApiToken, type SyncPrefs } from '../config';
 import { APP_VERSION, APP_VERSION_CODE } from '../version';
 import { getLastSync } from '../db/localDb';
+import {
+  getCredentialStatus,
+  saveCredential,
+  clearCredential,
+  fetchOcrCredential,
+  CREDENTIAL_TTL_DAYS,
+} from '../api/ocrCredential';
 import { SyncBadge, resolveSyncPhase } from '../components/SyncUI';
 import { SafeAreaHeader } from '../components/SafeArea';
 import WarrantyScreen from './WarrantyScreen';
@@ -31,6 +38,39 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
   const [tok, setTok] = useState('');
   const [view, setView] = useState<'main' | 'account' | 'ocr' | 'system' | 'warranty'>('main');
   useEffect(() => { getApiToken().then((t) => setTok(t || '')); }, []);
+
+  // OCR 直连（腾讯云）：本机密钥缓存状态 + 手动填写入口
+  const [ocrStatus, setOcrStatus] = useState(() => getCredentialStatus());
+  const [ocrSecretId, setOcrSecretId] = useState('');
+  const [ocrSecretKey, setOcrSecretKey] = useState('');
+  const [ocrRegion, setOcrRegion] = useState('ap-guangzhou');
+  useEffect(() => { setOcrStatus(getCredentialStatus()); }, []);
+  const handleSaveCredential = () => {
+    const sid = ocrSecretId.trim();
+    const sk = ocrSecretKey.trim();
+    if (!sid || !sk) { Alert.alert('请填写完整', 'SecretId 与 SecretKey 都需要填写'); return; }
+    saveCredential({ secretId: sid, secretKey: sk, region: ocrRegion.trim() || 'ap-guangzhou' });
+    setOcrSecretKey('');
+    setOcrStatus(getCredentialStatus());
+    Alert.alert('已保存', '手机将直连腾讯云识别，店铺电脑关机时也能识别。');
+  };
+  // 从店铺电脑后端拉取一次密钥并缓存（电脑开机时点一下即可，之后长期离线可用）
+  const handleFetchCredential = async () => {
+    const c = await fetchOcrCredential(baseUrl);
+    if (c) {
+      saveCredential(c);
+      setOcrStatus(getCredentialStatus());
+      Alert.alert('已获取', `密钥已缓存 ${CREDENTIAL_TTL_DAYS} 天，店铺电脑关机后也能识别。`);
+    } else {
+      Alert.alert('未获取到', '请确认：①店铺电脑已开机且 3001 在运行；②服务器地址正确；③后端已配置腾讯云密钥。');
+    }
+  };
+  const handleClearCredential = () => {
+    Alert.alert('清除密钥？', '清除后若电脑未下发密钥，将只能在店铺电脑开机时识别。', [
+      { text: '取消', style: 'cancel' },
+      { text: '清除', style: 'destructive', onPress: () => { clearCredential(); setOcrStatus(getCredentialStatus()); } },
+    ]);
+  };
 
   const SUB_TITLES: Record<string, string> = {
     account: '账号管理',
@@ -144,6 +184,69 @@ export default function Settings({ baseUrl, onBaseUrlChange, onTestConnection, s
             <Text style={styles.testBtnText}>测试连接</Text>
           </TouchableOpacity>
           <Text style={styles.hint}>店外使用时，把地址改成店铺后端的公网地址或域名（含 http://），保存后重启也生效。</Text>
+        </View>
+      </View>
+
+      {/* OCR 直连（腾讯云）：店铺电脑关机时手机也能识别 */}
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>OCR 直连（腾讯云）</Text>
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>直连状态</Text>
+          <Text style={[styles.rowValue, { color: ocrStatus.has ? (ocrStatus.expired ? theme.color.warning : theme.color.success) : theme.color.danger }]}>
+            {ocrStatus.has
+              ? (ocrStatus.expired ? `已过期（仍会复用）` : `可用 · 剩余 ${ocrStatus.daysLeft} 天`)
+              : '未配置'}
+          </Text>
+        </View>
+        {ocrStatus.has ? (
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>密钥 / 区域</Text>
+            <Text style={[styles.rowValue, { fontFamily: theme.font.family.mono }]}>{`${ocrStatus.secretIdMasked} · ${ocrStatus.region}`}</Text>
+          </View>
+        ) : null}
+        <View style={styles.field}>
+          <Text style={styles.label}>SecretId</Text>
+          <TextInput
+            style={styles.input}
+            value={ocrSecretId}
+            onChangeText={setOcrSecretId}
+            placeholder="AKID..."
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Text style={styles.label}>SecretKey</Text>
+          <TextInput
+            style={styles.input}
+            value={ocrSecretKey}
+            onChangeText={setOcrSecretKey}
+            placeholder="填写后点「保存密钥」"
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Text style={styles.label}>地域（默认 ap-guangzhou）</Text>
+          <TextInput
+            style={styles.input}
+            value={ocrRegion}
+            onChangeText={setOcrRegion}
+            placeholder="ap-guangzhou"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity style={styles.testBtn} onPress={handleFetchCredential}>
+            <Text style={styles.testBtnText}>从店铺电脑获取</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.testBtn, { marginTop: 8 }]} onPress={handleSaveCredential}>
+            <Text style={styles.testBtnText}>保存密钥</Text>
+          </TouchableOpacity>
+          {ocrStatus.has ? (
+            <TouchableOpacity style={[styles.testBtn, { marginTop: 8 }]} onPress={handleClearCredential}>
+              <Text style={styles.testBtnText}>清除密钥</Text>
+            </TouchableOpacity>
+          ) : null}
+          <Text style={styles.hint}>
+            {`保存后手机直连腾讯云识别：店铺电脑关机也能识别，不必等电脑开机。密钥仅存本机，有效期 ${CREDENTIAL_TTL_DAYS} 天；过期会自动尝试刷新，刷新不了仍复用旧密钥。建议使用腾讯云「仅 OCR 权限」的子账号密钥并设置调用限额。`}
+          </Text>
         </View>
       </View>
 
