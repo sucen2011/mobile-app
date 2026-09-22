@@ -1221,7 +1221,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
       const step = rebatePlanTemplate === 'quarterly' ? 3 : 1;
       const base = rebatePlanStart.length === 7 ? `${rebatePlanStart}-01` : (rebatePlanStart || todayStr());
       const items = rebatePlanGlobalItems.map((it) => ({ ...it }));
-      const remark = rebatePlanTemplate === 'quarterly' ? '按季' : '按月均摊';
+      const remark = rebatePlanTemplate === 'quarterly' ? '按季' : '按月';
       if (prev.length === 0) {
         return [{ seq: 1, planDate: base, status: 'pending', items: items.map((it) => ({ ...it })), actualItems: [], settledDate: null, remark }];
       }
@@ -1612,7 +1612,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     return list;
   };
 
-  // 按月均摊：按费用总额 N 期等额（末期补差）
+  // 按月：按费用总额 N 期等额（末期补差）
   const buildEqualMonthly = (): any[] | null => {
     const total = Number(amount.replace(/[^0-9.]/g, '')) || 0;
     if (total <= 0) return null;
@@ -1623,7 +1623,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
     let m = clampMonth(planStartMonth);
     for (let i = 0; i < count; i++) {
       const amt = i === count - 1 ? fmtMoney(total - base * (count - 1)) : base;
-      list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·均摊`, status: 0, settledAmount: 0, settledDate: null, images: [] });
+      list.push({ seq: i + 1, planDate: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}`, planAmount: amt, remark: `${y}年${m}月·按月`, status: 0, settledAmount: 0, settledDate: null, images: [] });
       m += 1; if (m > 12) { m = 1; y += 1; }
     }
     return list;
@@ -1649,7 +1649,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
   const genSeasonal = () => { setPlanList(buildSeasonal()); setPlanTemplate('seasonal'); };
   const genEqualMonthly = () => {
     const l = buildEqualMonthly();
-    if (!l) { Alert.alert('请先填写费用总额', '按月均摊模板需要先填「费用总额（元）」'); return; }
+    if (!l) { Alert.alert('请先填写费用总额', '按月模板需要先填「费用总额（元）」'); return; }
     setPlanList(l); setPlanTemplate('equal');
   };
   const genQuarterly = () => {
@@ -1797,7 +1797,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 {/* 快速模板（可选）：一键生成计划，随后可逐行微调 */}
                 <Text style={styles.fieldLabel}>快速模板（可选）</Text>
                 <View style={styles.chipRow}>
-                  <TouchableOpacity style={styles.chip} onPress={genEqualMonthly}><Text style={styles.chipText}>按月均摊</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.chip} onPress={genEqualMonthly}><Text style={styles.chipText}>按月</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.chip} onPress={genQuarterly}><Text style={styles.chipText}>按季</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.chip} onPress={genSeasonal}><Text style={styles.chipText}>旺季淡季</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.chip} onPress={() => { setPlanList([]); setPlanTemplate('custom'); }}><Text style={styles.chipText}>自定义</Text></TouchableOpacity>
@@ -1806,7 +1806,7 @@ function ExpenseForm({ theme, styles, baseUrl, editing, editingImages, onBack, o
                 <View style={styles.dualRow}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.fieldLabel}>费用总额（元）</Text>
-                    <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="按月均摊/按季需要" placeholderTextColor={theme.color.textAppTertiary} />
+                    <TextInput style={styles.input} value={amount} {...numInput(setAmount)} placeholder="按月/按季需要" placeholderTextColor={theme.color.textAppTertiary} />
                   </View>
                   <View style={{ width: 12 }} />
                   <View style={{ flex: 1 }}>
